@@ -1,88 +1,140 @@
-#!/usr/bin/env python
+import codecs
+import os
+import re
+import sys
 
 from setuptools import setup
-from setuptools.command.build_py import build_py
-from setuptools import Command
-from distutils.errors import DistutilsPlatformError
-import os
-import subprocess
-from distutils.spawn import find_executable
+from setuptools import find_packages
 
-proto = [ 'trustify/protocol/chocolate.proto' ]
+# Workaround for http://bugs.python.org/issue8876, see
+# http://bugs.python.org/issue8876#msg208792
+# This can be removed when using Python 2.7.9 or later:
+# https://hg.python.org/cpython/raw-file/v2.7.9/Misc/NEWS
+if os.path.abspath(__file__).split(os.path.sep)[1] == 'vagrant':
+    del os.link
 
-class build_py_with_protobuf(build_py):
-    protoc = find_executable("protoc")
 
-    def run_protoc(self, proto):
-        try:
-            proc = subprocess.Popen(
-                [self.protoc, '--python_out', '.', proto],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        except OSError, ex:
-            if ex.errno == errno.ENOENT:
-                print ("Could not find protoc command. Make sure protobuf is "
-                    "installed and your PATH environment is set.")
-                raise DistutilsPlatformError("Failed to generate protbuf "
-                    "files with protoc.")
-            else:
-                raise
-        out = proc.communicate()[0]
-        result = proc.wait()
-        if result != 0:
-            print "Error during protobuf files generation with protoc:"
-            print out
-            raise DistutilsPlatformError("Failed to generate protobuf "
-                "files with protoc.")
+def read_file(filename, encoding='utf8'):
+    """Read unicode from given file."""
+    with codecs.open(filename, encoding=encoding) as fd:
+        return fd.read()
 
-    def run(self):
-        for p in proto:
-            self.run_protoc(p)
 
-        build_py.run(self)
+here = os.path.abspath(os.path.dirname(__file__))
 
-class clean_with_protobuf(Command):
-    user_options = [("all", "a", "")]
+# read version number (and other metadata) from package init
+init_fn = os.path.join(here, 'certbot', '__init__.py')
+meta = dict(re.findall(r"""__([a-z]+)__ = '([^']+)""", read_file(init_fn)))
 
-    def initialize_options(self):
-        self.all = True
-        pass
+readme = read_file(os.path.join(here, 'README.rst'))
+changes = read_file(os.path.join(here, 'CHANGES.rst'))
+version = meta['version']
 
-    def finalize_options(self):
-        pass
+# Please update tox.ini when modifying dependency version requirements
+install_requires = [
+    'acme=={0}'.format(version),
+    # We technically need ConfigArgParse 0.10.0 for Python 2.6 support, but
+    # saying so here causes a runtime error against our temporary fork of 0.9.3
+    # in which we added 2.6 support (see #2243), so we relax the requirement.
+    'ConfigArgParse>=0.9.3',
+    'configobj',
+    'cryptography>=0.7',  # load_pem_x509_certificate
+    'parsedatetime>=1.3',  # Calendar.parseDT
+    'psutil>=2.1.0',  # net_connections introduced in 2.1.0
+    'PyOpenSSL',
+    'pyrfc3339',
+    'python2-pythondialog>=3.2.2rc1',  # Debian squeeze support, cf. #280
+    'pytz',
+    # For pkg_resources. >=1.0 so pip resolves it to a version cryptography
+    # will tolerate; see #2599:
+    'setuptools>=1.0',
+    'six',
+    'zope.component',
+    'zope.interface',
+]
 
-    def run(self):
-        for p in proto:
-            pb2 = p.replace(".proto", "_pb2.py")
-            if not os.path.exists(pb2):
-                continue
-            os.unlink(pb2)
+# env markers in extras_require cause problems with older pip: #517
+# Keep in sync with conditional_requirements.py.
+if sys.version_info < (2, 7):
+    install_requires.extend([
+        # only some distros recognize stdlib argparse as already satisfying
+        'argparse',
+        'mock<1.1.0',
+    ])
+else:
+    install_requires.append('mock')
+
+dev_extras = [
+    # Pin astroid==1.3.5, pylint==1.4.2 as a workaround for #289
+    'astroid==1.3.5',
+    'coverage',
+    'nose',
+    'nosexcover',
+    'pep8',
+    'pkginfo<=1.2.1',
+    'pylint==1.4.2',  # upstream #248
+    'tox',
+    'twine',
+    'wheel',
+]
+
+docs_extras = [
+    'repoze.sphinx.autointerface',
+    'Sphinx>=1.0',  # autodoc_member_order = 'bysource', autodoc_default_flags
+    'sphinx_rtd_theme',
+    'sphinxcontrib-programoutput',
+]
 
 setup(
-    name="trustify",
-    version="0.1",
-    description="Trustify",
-    author="Trustify project",
-    license="",
-    url="https://trustify.net/",
-    packages=[
-        'trustify',
-        'trustify.protocol',
-        'trustify.client',
+    name='certbot',
+    version=version,
+    description="ACME client",
+    long_description=readme,  # later: + '\n\n' + changes
+    url='https://github.com/letsencrypt/letsencrypt',
+    author="Certbot Project",
+    author_email='client-dev@letsencrypt.org',
+    license='Apache License 2.0',
+    classifiers=[
+        'Development Status :: 3 - Alpha',
+        'Environment :: Console',
+        'Environment :: Console :: Curses',
+        'Intended Audience :: System Administrators',
+        'License :: OSI Approved :: Apache Software License',
+        'Operating System :: POSIX :: Linux',
+        'Programming Language :: Python',
+        'Programming Language :: Python :: 2',
+        'Programming Language :: Python :: 2.6',
+        'Programming Language :: Python :: 2.7',
+        'Topic :: Internet :: WWW/HTTP',
+        'Topic :: Security',
+        'Topic :: System :: Installation/Setup',
+        'Topic :: System :: Networking',
+        'Topic :: System :: Systems Administration',
+        'Topic :: Utilities',
     ],
-    install_requires=[
-        #'dialog',
-        'protobuf',
-        'python-augeas',
-        'pycrypto',
-        'M2Crypto',
-    ],
+
+    packages=find_packages(exclude=['docs', 'examples', 'tests', 'venv']),
+    include_package_data=True,
+
+    install_requires=install_requires,
+    extras_require={
+        'dev': dev_extras,
+        'docs': docs_extras,
+    },
+
+    # to test all packages run "python setup.py test -s
+    # {acme,certbot_apache,certbot_nginx}"
+    test_suite='certbot',
+
     entry_points={
         'console_scripts': [
-            'trustify = trustify.client.client:authenticate'
-        ]
-    },
-    cmdclass={
-        'build_py': build_py_with_protobuf,
-        'clean': clean_with_protobuf,
+            'certbot = certbot.main:main',
+        ],
+        'certbot.plugins': [
+            'manual = certbot.plugins.manual:Authenticator',
+            'null = certbot.plugins.null:Installer',
+            'standalone = certbot.plugins.standalone:Authenticator',
+            'webroot = certbot.plugins.webroot:Authenticator',
+        ],
     },
 )
