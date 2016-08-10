@@ -34,6 +34,20 @@ class ReverterCheckpointLocalTest(unittest.TestCase):
 
         logging.disable(logging.NOTSET)
 
+    @mock.patch("certbot.reverter.Reverter._read_and_append")
+    def test_no_change(self, mock_read):
+        mock_read.side_effect = OSError("cannot even")
+        try:
+            self.reverter.add_to_checkpoint(self.sets[0], "save1")
+        except OSError:
+            pass
+        self.reverter.finalize_checkpoint("blah")
+        path = os.listdir(self.reverter.config.backup_dir)[0]
+        no_change = os.path.join(self.reverter.config.backup_dir, path, "CHANGES_SINCE")
+        with open(no_change, "r") as f:
+            x = f.read()
+        self.assertTrue("No changes" in x)
+
     def test_basic_add_to_temp_checkpoint(self):
         # These shouldn't conflict even though they are both named config.txt
         self.reverter.add_to_temp_checkpoint(self.sets[0], "save1")
@@ -150,7 +164,7 @@ class ReverterCheckpointLocalTest(unittest.TestCase):
                 errors.ReverterError, self.reverter.register_undo_command,
                 True, ["command"])
 
-    @mock.patch("certbot.le_util.run_script")
+    @mock.patch("certbot.util.run_script")
     def test_run_undo_commands(self, mock_run):
         mock_run.side_effect = ["", errors.SubprocessError]
         coms = [
@@ -348,8 +362,8 @@ class TestFullCheckpointsReverter(unittest.TestCase):
         self.assertEqual(mock_logger.warning.call_count, 1)
 
         # Test Generic warning
-        mock_logger.warning.call_count = 0
         self._setup_three_checkpoints()
+        mock_logger.warning.call_count = 0
         self.reverter.rollback_checkpoints(4)
         self.assertEqual(mock_logger.warning.call_count, 1)
 

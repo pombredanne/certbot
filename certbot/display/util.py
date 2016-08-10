@@ -1,4 +1,5 @@
 """Certbot display."""
+import logging
 import os
 import textwrap
 
@@ -8,6 +9,9 @@ import zope.interface
 from certbot import interfaces
 from certbot import errors
 from certbot.display import completer
+
+
+logger = logging.getLogger(__name__)
 
 WIDTH = 72
 HEIGHT = 20
@@ -29,6 +33,9 @@ CANCEL = "cancel"
 HELP = "help"
 """Display exit code when for when the user requests more help."""
 
+ESC = "esc"
+"""Display exit code when the user hits Escape"""
+
 
 def _wrap_lines(msg):
     """Format lines nicely to 80 chars.
@@ -41,9 +48,32 @@ def _wrap_lines(msg):
     """
     lines = msg.splitlines()
     fixed_l = []
+
     for line in lines:
-        fixed_l.append(textwrap.fill(line, 80))
+        fixed_l.append(textwrap.fill(
+            line,
+            80,
+            break_long_words=False,
+            break_on_hyphens=False))
+
     return os.linesep.join(fixed_l)
+
+
+def _clean(dialog_result):
+    """Treat sundy python-dialog return codes as CANCEL
+
+    :param tuple dialog_result: (code, result)
+    :returns: the argument but with unknown codes set to -1 (Error)
+    :rtype: tuple
+    """
+    code, result = dialog_result
+    if code in (OK, HELP):
+        return dialog_result
+    elif code in (CANCEL, ESC):
+        return (CANCEL, result)
+    else:
+        logger.debug("Surprising dialog return code %s", code)
+        return (CANCEL, result)
 
 
 @zope.interface.implementer(interfaces.IDisplay)
@@ -53,6 +83,7 @@ class NcursesDisplay(object):
     def __init__(self, width=WIDTH, height=HEIGHT):
         super(NcursesDisplay, self).__init__()
         self.dialog = dialog.Dialog()
+        assert OK == self.dialog.DIALOG_OK, "What kind of absurdity is this?"
         self.width = width
         self.height = height
 
@@ -87,7 +118,7 @@ class NcursesDisplay(object):
         :param dict unused_kwargs: absorbs default / cli_args
 
         :returns: tuple of the form (`code`, `index`) where
-            `code` - int display exit code
+            `code` - display exit code
             `int` - index of the selected item
         :rtype: tuple
 
@@ -106,7 +137,7 @@ class NcursesDisplay(object):
         # Can accept either tuples or just the actual choices
         if choices and isinstance(choices[0], tuple):
             # pylint: disable=star-args
-            code, selection = self.dialog.menu(message, **menu_options)
+            code, selection = _clean(self.dialog.menu(message, **menu_options))
 
             # Return the selection index
             for i, choice in enumerate(choices):
@@ -121,9 +152,9 @@ class NcursesDisplay(object):
                 (str(i), choice) for i, choice in enumerate(choices, 1)
             ]
             # pylint: disable=star-args
-            code, index = self.dialog.menu(message, **menu_options)
+            code, index = _clean(self.dialog.menu(message, **menu_options))
 
-            if code == CANCEL:
+            if code == CANCEL or index == "":
                 return code, -1
 
             return code, int(index) - 1
@@ -135,7 +166,7 @@ class NcursesDisplay(object):
         :param dict _kwargs: absorbs default / cli_args
 
         :returns: tuple of the form (`code`, `string`) where
-            `code` - int display exit code
+            `code` - display exit code
             `string` - input entered by the user
 
         """
@@ -143,7 +174,7 @@ class NcursesDisplay(object):
         # each section takes at least one line, plus extras if it's longer than self.width
         wordlines = [1 + (len(section) / self.width) for section in sections]
         height = 6 + sum(wordlines) + len(sections)
-        return self.dialog.inputbox(message, width=self.width, height=height)
+        return _clean(self.dialog.inputbox(message, width=self.width, height=height))
 
     def yesno(self, message, yes_label="Yes", no_label="No", **unused_kwargs):
         """Display a Yes/No dialog box.
@@ -174,13 +205,13 @@ class NcursesDisplay(object):
 
 
         :returns: tuple of the form (`code`, `list_tags`) where
-            `code` - int display exit code
+            `code` - display exit code
             `list_tags` - list of str tags selected by the user
 
         """
         choices = [(tag, "", default_status) for tag in tags]
-        return self.dialog.checklist(
-            message, width=self.width, height=self.height, choices=choices)
+        return _clean(self.dialog.checklist(
+            message, width=self.width, height=self.height, choices=choices))
 
     def directory_select(self, message, **unused_kwargs):
         """Display a directory selection screen.
@@ -188,14 +219,14 @@ class NcursesDisplay(object):
         :param str message: prompt to give the user
 
         :returns: tuple of the form (`code`, `string`) where
-            `code` - int display exit code
+            `code` - display exit code
             `string` - input entered by the user
 
         """
         root_directory = os.path.abspath(os.sep)
-        return self.dialog.dselect(
+        return _clean(self.dialog.dselect(
             filepath=root_directory, width=self.width,
-            height=self.height, help_button=True, title=message)
+            height=self.height, help_button=True, title=message))
 
 
 @zope.interface.implementer(interfaces.IDisplay)
@@ -265,7 +296,11 @@ class FileDisplay(object):
 
         """
         ans = raw_input(
-            textwrap.fill("%s (Enter 'c' to cancel): " % message, 80))
+            textwrap.fill(
+                "%s (Enter 'c' to cancel): " % message,
+                80,
+                break_long_words=False,
+                break_on_hyphens=False))
 
         if ans == "c" or ans == "C":
             return CANCEL, "-1"
@@ -346,7 +381,7 @@ class FileDisplay(object):
         :param str message: prompt to give the user
 
         :returns: tuple of the form (`code`, `string`) where
-            `code` - int display exit code
+            `code` - display exit code
             `string` - input entered by the user
 
         """
@@ -402,7 +437,11 @@ class FileDisplay(object):
         # Write out the menu choices
         for i, desc in enumerate(choices, 1):
             self.outfile.write(
-                textwrap.fill("{num}: {desc}".format(num=i, desc=desc), 80))
+                textwrap.fill(
+                    "{num}: {desc}".format(num=i, desc=desc),
+                    80,
+                    break_long_words=False,
+                    break_on_hyphens=False))
 
             # Keep this outside of the textwrap
             self.outfile.write(os.linesep)
