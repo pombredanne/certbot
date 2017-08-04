@@ -1,6 +1,6 @@
 """Client annotated ACME challenges.
 
-Please use names such as ``achall`` to distiguish from variables "of type"
+Please use names such as ``achall`` to distinguish from variables "of type"
 :class:`acme.challenges.Challenge` (denoted by ``chall``)
 and :class:`.ChallengeBody` (denoted by ``challb``)::
 
@@ -27,7 +27,6 @@ logger = logging.getLogger(__name__)
 
 
 # pylint: disable=too-few-public-methods
-
 
 class AnnotatedChallenge(jose.ImmutableMap):
     """Client annotated challenge.

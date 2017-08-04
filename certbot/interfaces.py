@@ -32,7 +32,7 @@ class AccountStorage(object):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def save(self, account):  # pragma: no cover
+    def save(self, account, client):  # pragma: no cover
         """Save account.
 
         :raises .AccountStorageError: if account could not be saved
@@ -99,7 +99,7 @@ class IPluginFactory(zope.interface.Interface):
 class IPlugin(zope.interface.Interface):
     """Certbot plugin."""
 
-    def prepare():
+    def prepare():  # type: ignore
         """Prepare the plugin.
 
         Finish up any additional initialization.
@@ -118,7 +118,7 @@ class IPlugin(zope.interface.Interface):
 
         """
 
-    def more_info():
+    def more_info():  # type: ignore
         """Human-readable string to help the user.
 
         Should describe the steps taken and any relevant info to help the user
@@ -138,15 +138,15 @@ class IAuthenticator(IPlugin):
     """
 
     def get_chall_pref(domain):
-        """Return list of challenge preferences.
+        """Return `collections.Iterable` of challenge preferences.
 
         :param str domain: Domain for which challenge preferences are sought.
 
-        :returns: List of challenge types (subclasses of
+        :returns: `collections.Iterable` of challenge types (subclasses of
             :class:`acme.challenges.Challenge`) with the most
             preferred challenges first. If a type is not specified, it means the
             Authenticator cannot perform the challenge.
-        :rtype: list
+        :rtype: `collections.Iterable`
 
         """
 
@@ -158,7 +158,7 @@ class IAuthenticator(IPlugin):
             instances, such that it contains types found within
             :func:`get_chall_pref` only.
 
-        :returns: List of ACME
+        :returns: `collections.Iterable` of ACME
             :class:`~acme.challenges.ChallengeResponse` instances
             or if the :class:`~acme.challenges.Challenge` cannot
             be fulfilled then:
@@ -168,7 +168,7 @@ class IAuthenticator(IPlugin):
             ``False``
               Authenticator will never be able to perform (error).
 
-        :rtype: :class:`list` of
+        :rtype: :class:`collections.Iterable` of
             :class:`acme.challenges.ChallengeResponse`,
             where responses are required to be returned in
             the same order as corresponding input challenges
@@ -201,7 +201,7 @@ class IConfig(zope.interface.Interface):
     """
     server = zope.interface.Attribute("ACME Directory Resource URI.")
     email = zope.interface.Attribute(
-        "Email used for registration and recovery contact.")
+        "Email used for registration and recovery contact. (default: Ask)")
     rsa_key_size = zope.interface.Attribute("Size of the RSA key.")
     must_staple = zope.interface.Attribute(
         "Adds the OCSP Must Staple extension to the certificate. "
@@ -223,18 +223,38 @@ class IConfig(zope.interface.Interface):
     temp_checkpoint_dir = zope.interface.Attribute(
         "Temporary checkpoint directory.")
 
-    renewer_config_file = zope.interface.Attribute(
-        "Location of renewal configuration file.")
-
     no_verify_ssl = zope.interface.Attribute(
-        "Disable SSL certificate verification.")
+        "Disable verification of the ACME server's certificate.")
     tls_sni_01_port = zope.interface.Attribute(
-        "Port number to perform tls-sni-01 challenge. "
-        "Boulder in testing mode defaults to 5001.")
+        "Port used during tls-sni-01 challenge. "
+        "This only affects the port Certbot listens on. "
+        "A conforming ACME server will still attempt to connect on port 443.")
+    tls_sni_01_address = zope.interface.Attribute(
+        "The address the server listens to during tls-sni-01 challenge.")
 
     http01_port = zope.interface.Attribute(
-        "Port used in the SimpleHttp challenge.")
+        "Port used in the http-01 challenge. "
+        "This only affects the port Certbot listens on. "
+        "A conforming ACME server will still attempt to connect on port 80.")
 
+    http01_address = zope.interface.Attribute(
+        "The address the server listens to during http-01 challenge.")
+
+    pref_challs = zope.interface.Attribute(
+        "Sorted user specified preferred challenges"
+        "type strings with the most preferred challenge listed first")
+
+    allow_subset_of_names = zope.interface.Attribute(
+        "When performing domain validation, do not consider it a failure "
+        "if authorizations can not be obtained for a strict subset of "
+        "the requested domains. This may be useful for allowing renewals for "
+        "multiple domains to succeed even if some domains no longer point "
+        "at this system. This is a boolean")
+
+    strict_permissions = zope.interface.Attribute(
+        "Require that all configuration files are owned by the current "
+        "user; only needed if your config is somewhere unsafe like /tmp/."
+        "This is a boolean")
 
 class IInstaller(IPlugin):
     """Generic Certbot Installer Interface.
@@ -251,10 +271,10 @@ class IInstaller(IPlugin):
 
     """
 
-    def get_all_names():
+    def get_all_names():  # type: ignore
         """Returns all names that may be authenticated.
 
-        :rtype: `list` of `str`
+        :rtype: `collections.Iterable` of `str`
 
         """
 
@@ -288,25 +308,12 @@ class IInstaller(IPlugin):
 
         """
 
-    def supported_enhancements():
-        """Returns a list of supported enhancements.
+    def supported_enhancements():  # type: ignore
+        """Returns a `collections.Iterable` of supported enhancements.
 
         :returns: supported enhancements which should be a subset of
             :const:`~certbot.constants.ENHANCEMENTS`
-        :rtype: :class:`list` of :class:`str`
-
-        """
-
-    def get_all_certs_keys():
-        """Retrieve all certs and keys set in configuration.
-
-        :returns: tuples with form `[(cert, key, path)]`, where:
-
-            - `cert` - str path to certificate file
-            - `key` - str path to associated key file
-            - `path` - file path to configuration file
-
-        :rtype: list
+        :rtype: :class:`collections.Iterable` of :class:`str`
 
         """
 
@@ -339,7 +346,7 @@ class IInstaller(IPlugin):
 
         """
 
-    def recovery_routine():
+    def recovery_routine():  # type: ignore
         """Revert configuration to most recent finalized checkpoint.
 
         Remove all changes (temporary and permanent) that have not been
@@ -350,21 +357,21 @@ class IInstaller(IPlugin):
 
         """
 
-    def view_config_changes():
+    def view_config_changes():  # type: ignore
         """Display all of the LE config changes.
 
         :raises .PluginError: when config changes cannot be parsed
 
         """
 
-    def config_test():
+    def config_test():  # type: ignore
         """Make sure the configuration is valid.
 
         :raises .MisconfigurationError: when the config is not in a usable state
 
         """
 
-    def restart():
+    def restart():  # type: ignore
         """Restart or refresh the server content.
 
         :raises .PluginError: when server cannot be restarted
@@ -374,31 +381,41 @@ class IInstaller(IPlugin):
 
 class IDisplay(zope.interface.Interface):
     """Generic display."""
+    # pylint: disable=too-many-arguments
+    # see https://github.com/certbot/certbot/issues/3915
 
-    def notification(message, height, pause):
+    def notification(message, pause, wrap=True, force_interactive=False):
         """Displays a string message
 
         :param str message: Message to display
-        :param int height: Height of dialog box if applicable
         :param bool pause: Whether or not the application should pause for
             confirmation (if available)
+        :param bool wrap: Whether or not the application should wrap text
+        :param bool force_interactive: True if it's safe to prompt the user
+            because it won't cause any workflow regressions
 
         """
 
-    def menu(message, choices, ok_label="OK",      # pylint: disable=too-many-arguments
-             cancel_label="Cancel", help_label="", default=None, cli_flag=None):
+    def menu(message, choices, ok_label=None,
+             cancel_label=None, help_label=None,
+             default=None, cli_flag=None, force_interactive=False):
         """Displays a generic menu.
+
+        When not setting force_interactive=True, you must provide a
+        default value.
 
         :param str message: message to display
 
         :param choices: choices
         :type choices: :class:`list` of :func:`tuple` or :class:`str`
 
-        :param str ok_label: label for OK button
-        :param str cancel_label: label for Cancel button
-        :param str help_label: label for Help button
+        :param str ok_label: label for OK button (UNUSED)
+        :param str cancel_label: label for Cancel button (UNUSED)
+        :param str help_label: label for Help button (UNUSED)
         :param int default: default (non-interactive) choice from the menu
         :param str cli_flag: to automate choice from the menu, eg "--keep"
+        :param bool force_interactive: True if it's safe to prompt the user
+            because it won't cause any workflow regressions
 
         :returns: tuple of (`code`, `index`) where
             `code` - str display exit code
@@ -409,10 +426,16 @@ class IDisplay(zope.interface.Interface):
 
         """
 
-    def input(message, default=None, cli_args=None):
+    def input(message, default=None, cli_args=None, force_interactive=False):
         """Accept input from the user.
 
+        When not setting force_interactive=True, you must provide a
+        default value.
+
         :param str message: message to display to the user
+        :param str default: default (non-interactive) response to prompt
+        :param bool force_interactive: True if it's safe to prompt the user
+            because it won't cause any workflow regressions
 
         :returns: tuple of (`code`, `input`) where
             `code` - str display exit code
@@ -425,14 +448,19 @@ class IDisplay(zope.interface.Interface):
         """
 
     def yesno(message, yes_label="Yes", no_label="No", default=None,
-              cli_args=None):
+              cli_args=None, force_interactive=False):
         """Query the user with a yes/no question.
 
         Yes and No label must begin with different letters.
 
+        When not setting force_interactive=True, you must provide a
+        default value.
+
         :param str message: question for the user
         :param str default: default (non-interactive) choice from the menu
         :param str cli_flag: to automate choice from the menu, eg "--redirect / --no-redirect"
+        :param bool force_interactive: True if it's safe to prompt the user
+            because it won't cause any workflow regressions
 
         :returns: True for "Yes", False for "No"
         :rtype: bool
@@ -442,14 +470,18 @@ class IDisplay(zope.interface.Interface):
 
         """
 
-    def checklist(message, tags, default_state, default=None, cli_args=None):
+    def checklist(message, tags, default=None, cli_args=None, force_interactive=False):
         """Allow for multiple selections from a menu.
+
+        When not setting force_interactive=True, you must provide a
+        default value.
 
         :param str message: message to display to the user
         :param list tags: where each is of type :class:`str` len(tags) > 0
-        :param bool default_status: If True, items are in a selected state by default.
         :param str default: default (non-interactive) state of the checklist
         :param str cli_flag: to automate choice from the menu, eg "--domains"
+        :param bool force_interactive: True if it's safe to prompt the user
+            because it won't cause any workflow regressions
 
         :returns: tuple of the form (code, list_tags) where
             `code` - int display exit code
@@ -461,8 +493,12 @@ class IDisplay(zope.interface.Interface):
 
         """
 
-    def directory_select(self, message, default=None, cli_flag=None):
+    def directory_select(self, message, default=None,
+                         cli_flag=None, force_interactive=False):
         """Display a directory selection screen.
+
+        When not setting force_interactive=True, you must provide a
+        default value.
 
         :param str message: prompt to give the user
         :param default: the default value to return, if one exists, when
@@ -470,6 +506,8 @@ class IDisplay(zope.interface.Interface):
         :param str cli_flag: option used to set this value with the CLI,
             if one exists, to be included in error messages given by
             NoninteractiveDisplay
+        :param bool force_interactive: True if it's safe to prompt the user
+            because it won't cause any workflow regressions
 
         :returns: tuple of the form (`code`, `string`) where
             `code` - int display exit code

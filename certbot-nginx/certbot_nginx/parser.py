@@ -24,10 +24,10 @@ class NginxParser(object):
 
     """
 
-    def __init__(self, root, ssl_options):
+    def __init__(self, root):
         self.parsed = {}
         self.root = os.path.abspath(root)
-        self.loc = self._set_locations(ssl_options)
+        self.config_root = self._find_config_root()
 
         # Parse nginx.conf and included files.
         # TODO: Check sites-available/ as well. For now, the configurator does
@@ -39,7 +39,7 @@ class NginxParser(object):
 
         """
         self.parsed = {}
-        self._parse_recursively(self.loc["root"])
+        self._parse_recursively(self.config_root)
 
     def _parse_recursively(self, filepath):
         """Parses nginx config files recursively by looking at 'include'
@@ -82,6 +82,43 @@ class NginxParser(object):
         else:
             return path
 
+    def _build_addr_to_ssl(self):
+        """Builds a map from address to whether it listens on ssl in any server block
+        """
+        servers = self._get_raw_servers()
+
+        addr_to_ssl = {}
+        for filename in servers:
+            for server, _ in servers[filename]:
+                # Parse the server block to save addr info
+                parsed_server = _parse_server_raw(server)
+                for addr in parsed_server['addrs']:
+                    addr_tuple = addr.normalized_tuple()
+                    if addr_tuple not in addr_to_ssl:
+                        addr_to_ssl[addr_tuple] = addr.ssl
+                    addr_to_ssl[addr_tuple] = addr.ssl or addr_to_ssl[addr_tuple]
+        return addr_to_ssl
+
+    def _get_raw_servers(self):
+        # pylint: disable=cell-var-from-loop
+        """Get a map of unparsed all server blocks
+        """
+        servers = {}
+        for filename in self.parsed:
+            tree = self.parsed[filename]
+            servers[filename] = []
+            srv = servers[filename]  # workaround undefined loop var in lambdas
+
+            # Find all the server blocks
+            _do_for_subarray(tree, lambda x: len(x) >= 2 and x[0] == ['server'],
+                             lambda x, y: srv.append((x[1], y)))
+
+            # Find 'include' statements in server blocks and append their trees
+            for i, (server, path) in enumerate(servers[filename]):
+                new_server = self._get_included_directives(server)
+                servers[filename][i] = (new_server, path)
+        return servers
+
     def get_vhosts(self):
         # pylint: disable=cell-var-from-loop
         """Gets list of all 'virtual hosts' found in Nginx configuration.
@@ -94,37 +131,36 @@ class NginxParser(object):
 
         """
         enabled = True  # We only look at enabled vhosts for now
+        servers = self._get_raw_servers()
+
         vhosts = []
-        servers = {}
-
-        for filename in self.parsed:
-            tree = self.parsed[filename]
-            servers[filename] = []
-            srv = servers[filename]  # workaround undefined loop var in lambdas
-
-            # Find all the server blocks
-            _do_for_subarray(tree, lambda x: x[0] == ['server'],
-                             lambda x: srv.append(x[1]))
-
-            # Find 'include' statements in server blocks and append their trees
-            for i, server in enumerate(servers[filename]):
-                new_server = self._get_included_directives(server)
-                servers[filename][i] = new_server
-
         for filename in servers:
-            for server in servers[filename]:
+            for server, path in servers[filename]:
                 # Parse the server block into a VirtualHost object
 
-                parsed_server = parse_server(server)
+                parsed_server = _parse_server_raw(server)
                 vhost = obj.VirtualHost(filename,
                                         parsed_server['addrs'],
                                         parsed_server['ssl'],
                                         enabled,
                                         parsed_server['names'],
-                                        server)
+                                        server,
+                                        path)
                 vhosts.append(vhost)
 
+        self._update_vhosts_addrs_ssl(vhosts)
+
         return vhosts
+
+    def _update_vhosts_addrs_ssl(self, vhosts):
+        """Update a list of raw parsed vhosts to include global address sslishness
+        """
+        addr_to_ssl = self._build_addr_to_ssl()
+        for vhost in vhosts:
+            for addr in vhost.addrs:
+                addr.ssl = addr_to_ssl[addr.normalized_tuple()]
+                if addr.ssl:
+                    vhost.ssl = True
 
     def _get_included_directives(self, block):
         """Returns array with the "include" directives expanded out by
@@ -169,33 +205,12 @@ class NginxParser(object):
                     trees.append(parsed)
             except IOError:
                 logger.warning("Could not open file: %s", item)
-            except pyparsing.ParseException:
-                logger.debug("Could not parse file: %s", item)
+            except pyparsing.ParseException as err:
+                logger.debug("Could not parse file: %s due to %s", item, err)
         return trees
 
-    def _set_locations(self, ssl_options):
-        """Set default location for directives.
-
-        Locations are given as file_paths
-        .. todo:: Make sure that files are included
-
-        """
-        root = self._find_config_root()
-        default = root
-
-        nginx_temp = os.path.join(self.root, "nginx_ports.conf")
-        if os.path.isfile(nginx_temp):
-            listen = nginx_temp
-            name = nginx_temp
-        else:
-            listen = default
-            name = default
-
-        return {"root": root, "default": default, "listen": listen,
-                "name": name, "ssl_options": ssl_options}
-
     def _find_config_root(self):
-        """Find the Nginx Configuration Root file."""
+        """Return the Nginx Configuration Root file."""
         location = ['nginx.conf']
 
         for name in location:
@@ -229,105 +244,86 @@ class NginxParser(object):
             except IOError:
                 logger.error("Could not open file for writing: %s", filename)
 
-    def _has_server_names(self, entry, names):
-        """Checks if a server block has the given set of server_names. This
-        is the primary way of identifying server blocks in the configurator.
-        Returns false if 'entry' doesn't look like a server block at all.
+    def parse_server(self, server):
+        """Parses a list of server directives, accounting for global address sslishness.
 
-        ..todo :: Doesn't match server blocks whose server_name directives are
-        split across multiple conf files.
+        :param list server: list of directives in a server block
+        :rtype: dict
+        """
+        addr_to_ssl = self._build_addr_to_ssl()
+        parsed_server = _parse_server_raw(server)
+        _apply_global_addr_ssl(addr_to_ssl, parsed_server)
+        return parsed_server
 
-        :param list entry: The block to search
-        :param set names: The names to match
+    def has_ssl_on_directive(self, vhost):
+        """Does vhost have ssl on for all ports?
+
+        :param :class:`~certbot_nginx.obj.VirtualHost` vhost: The vhost in question
+
+        :returns: True if 'ssl on' directive is included
         :rtype: bool
 
         """
-        if len(names) == 0:
-            # Nothing to identify blocks with
-            return False
+        server = vhost.raw
+        for directive in server:
+            if not directive:
+                continue
+            elif _is_ssl_on_directive(directive):
+                return True
 
-        if not isinstance(entry, list):
-            # Can't be a server block
-            return False
+        return False
 
-        new_entry = self._get_included_directives(entry)
-        server_names = set()
-        for item in new_entry:
-            if not isinstance(item, list):
-                # Can't be a server block
-                return False
+    def add_server_directives(self, vhost, directives, replace):
+        """Add or replace directives in the server block identified by vhost.
 
-            if len(item) > 0 and item[0] == 'server_name':
-                server_names.update(_get_servernames(item[1]))
+        This method modifies vhost to be fully consistent with the new directives.
 
-        return server_names == names
-
-    def add_server_directives(self, filename, names, directives,
-                              replace):
-        """Add or replace directives in the first server block with names.
-
-        ..note :: If replace is True, this raises a misconfiguration error
-        if the directive does not already exist.
+        ..note :: If replace is True and the directive already exists, the first
+        instance will be replaced. Otherwise, the directive is added.
         ..note :: If replace is False nothing gets added if an identical
         block exists already.
 
         ..todo :: Doesn't match server blocks whose server_name directives are
             split across multiple conf files.
 
-        :param str filename: The absolute filename of the config file
-        :param set names: The server_name to match
+        :param :class:`~certbot_nginx.obj.VirtualHost` vhost: The vhost
+            whose information we use to match on
         :param list directives: The directives to add
         :param bool replace: Whether to only replace existing directives
 
         """
+        filename = vhost.filep
         try:
-            _do_for_subarray(self.parsed[filename],
-                             lambda x: self._has_server_names(x, names),
-                             lambda x: _add_directives(x, directives, replace))
+            result = self.parsed[filename]
+            for index in vhost.path:
+                result = result[index]
+            if not isinstance(result, list) or len(result) != 2:
+                raise errors.MisconfigurationError("Not a server block.")
+            result = result[1]
+            _add_directives(result, directives, replace)
+
+            # update vhost based on new directives
+            new_server = self._get_included_directives(result)
+            parsed_server = self.parse_server(new_server)
+            vhost.addrs = parsed_server['addrs']
+            vhost.ssl = parsed_server['ssl']
+            vhost.names = parsed_server['names']
+            vhost.raw = new_server
         except errors.MisconfigurationError as err:
-            raise errors.MisconfigurationError("Problem in %s: %s" % (filename, err.message))
+            raise errors.MisconfigurationError("Problem in %s: %s" % (filename, str(err)))
 
-    def add_http_directives(self, filename, directives):
-        """Adds directives to the first encountered HTTP block in filename.
+def _parse_ssl_options(ssl_options):
+    if ssl_options is not None:
+        try:
+            with open(ssl_options) as _file:
+                return nginxparser.load(_file)
+        except IOError:
+            logger.warn("Missing NGINX TLS options file: %s", ssl_options)
+        except pyparsing.ParseBaseException as err:
+            logger.debug("Could not parse file: %s due to %s", ssl_options, err)
+    return []
 
-        We insert new directives at the top of the block to work around
-        https://trac.nginx.org/nginx/ticket/810: If the first server block
-        doesn't enable OCSP stapling, stapling is broken for all blocks.
-
-        :param str filename: The absolute filename of the config file
-        :param list directives: The directives to add
-
-        """
-        _do_for_subarray(self.parsed[filename],
-                         lambda x: x[0] == ['http'],
-                         lambda x: x[1].insert(0, directives))
-
-    def get_all_certs_keys(self):
-        """Gets all certs and keys in the nginx config.
-
-        :returns: list of tuples with form [(cert, key, path)]
-            cert - str path to certificate file
-            key - str path to associated key file
-            path - File path to configuration file.
-        :rtype: set
-
-        """
-        c_k = set()
-        vhosts = self.get_vhosts()
-        for vhost in vhosts:
-            tup = [None, None, vhost.filep]
-            if vhost.ssl:
-                for directive in vhost.raw:
-                    if directive[0] == 'ssl_certificate':
-                        tup[0] = directive[1]
-                    elif directive[0] == 'ssl_certificate_key':
-                        tup[1] = directive[1]
-            if tup[0] is not None and tup[1] is not None:
-                c_k.add(tuple(tup))
-        return c_k
-
-
-def _do_for_subarray(entry, condition, func):
+def _do_for_subarray(entry, condition, func, path=None):
     """Executes a function for a subarray of a nested array if it matches
     the given condition.
 
@@ -336,12 +332,14 @@ def _do_for_subarray(entry, condition, func):
     :param function func: The function to call for each matching item
 
     """
+    if path is None:
+        path = []
     if isinstance(entry, list):
         if condition(entry):
-            func(entry)
+            func(entry, path)
         else:
-            for item in entry:
-                _do_for_subarray(item, condition, func)
+            for index, item in enumerate(entry):
+                _do_for_subarray(item, condition, func, path + [index])
 
 
 def get_best_match(target_name, names):
@@ -448,20 +446,158 @@ def _is_include_directive(entry):
             len(entry) == 2 and entry[0] == 'include' and
             isinstance(entry[1], str))
 
+def _is_ssl_on_directive(entry):
+    """Checks if an nginx parsed entry is an 'ssl on' directive.
 
-def _get_servernames(names):
-    """Turns a server_name string into a list of server names
-
-    :param str names: server names
-    :rtype: list
+    :param list entry: the parsed entry
+    :returns: Whether it's an 'ssl on' directive
+    :rtype: bool
 
     """
-    whitespace_re = re.compile(r'\s+')
-    names = re.sub(whitespace_re, ' ', names)
-    return names.split(' ')
+    return (isinstance(entry, list) and
+            len(entry) == 2 and entry[0] == 'ssl' and
+            entry[1] == 'on')
+
+def _add_directives(block, directives, replace):
+    """Adds or replaces directives in a config block.
+
+    When replace=False, it's an error to try and add a directive that already
+    exists in the config block with a conflicting value.
+
+    When replace=True and a directive with the same name already exists in the
+    config block, the first instance will be replaced. Otherwise, the directive
+    will be added to the config block.
+
+    ..todo :: Find directives that are in included files.
+
+    :param list block: The block to replace in
+    :param list directives: The new directives.
+
+    """
+    for directive in directives:
+        _add_directive(block, directive, replace)
+    if block and '\n' not in block[-1]:  # could be "   \n  " or ["\n"] !
+        block.append(nginxparser.UnspacedList('\n'))
 
 
-def parse_server(server):
+INCLUDE = 'include'
+REPEATABLE_DIRECTIVES = set(['server_name', 'listen', INCLUDE])
+COMMENT = ' managed by Certbot'
+COMMENT_BLOCK = [' ', '#', COMMENT]
+
+def _comment_directive(block, location):
+    """Add a comment to the end of the line at location."""
+    next_entry = block[location + 1] if location + 1 < len(block) else None
+    if isinstance(next_entry, list) and next_entry:
+        if len(next_entry) >= 2 and next_entry[-2] == "#" and COMMENT in next_entry[-1]:
+            return
+        elif isinstance(next_entry, nginxparser.UnspacedList):
+            next_entry = next_entry.spaced[0]
+        else:
+            next_entry = next_entry[0]
+
+    block.insert(location + 1, COMMENT_BLOCK[:])
+    if next_entry is not None and "\n" not in next_entry:
+        block.insert(location + 2, '\n')
+
+def _comment_out_directive(block, location, include_location):
+    """Comment out the line at location, with a note of explanation."""
+    comment_message = ' duplicated in {0}'.format(include_location)
+    # add the end comment
+    # create a dumpable object out of block[location] (so it includes the ;)
+    directive = block[location]
+    new_dir_block = nginxparser.UnspacedList([]) # just a wrapper
+    new_dir_block.append(directive)
+    dumped = nginxparser.dumps(new_dir_block)
+    commented = dumped + ' #' + comment_message # add the comment directly to the one-line string
+    new_dir = nginxparser.loads(commented) # reload into UnspacedList
+
+    # add the beginning comment
+    insert_location = 0
+    if new_dir[0].spaced[0] != new_dir[0][0]: # if there's whitespace at the beginning
+        insert_location = 1
+    new_dir[0].spaced.insert(insert_location, "# ") # comment out the line
+    new_dir[0].spaced.append(";") # directly add in the ;, because now dumping won't work properly
+    dumped = nginxparser.dumps(new_dir)
+    new_dir = nginxparser.loads(dumped) # reload into an UnspacedList
+
+    block[location] = new_dir[0] # set the now-single-line-comment directive back in place
+
+def _add_directive(block, directive, replace):
+    """Adds or replaces a single directive in a config block.
+
+    See _add_directives for more documentation.
+
+    """
+    directive = nginxparser.UnspacedList(directive)
+    def is_whitespace_or_comment(directive):
+        """Is this directive either a whitespace or comment directive?"""
+        return len(directive) == 0 or directive[0] == '#'
+    if is_whitespace_or_comment(directive):
+        # whitespace or comment
+        block.append(directive)
+        return
+
+    def find_location(direc):
+        """ Find the index of a config line where the name of the directive matches
+        the name of the directive we want to add. If no line exists, use None.
+        """
+        return next((index for index, line in enumerate(block) \
+            if line and line[0] == direc[0]), None)
+
+    location = find_location(directive)
+
+    if replace:
+        if location is not None:
+            block[location] = directive
+            _comment_directive(block, location)
+            return
+    # Append directive. Fail if the name is not a repeatable directive name,
+    # and there is already a copy of that directive with a different value
+    # in the config file.
+
+    # handle flat include files
+
+    directive_name = directive[0]
+    def can_append(loc, dir_name):
+        """ Can we append this directive to the block? """
+        return loc is None or (isinstance(dir_name, str) and dir_name in REPEATABLE_DIRECTIVES)
+
+    err_fmt = 'tried to insert directive "{0}" but found conflicting "{1}".'
+
+    # Give a better error message about the specific directive than Nginx's "fail to restart"
+    if directive_name == INCLUDE:
+        # in theory, we might want to do this recursively, but in practice, that's really not
+        # necessary because we know what file we're talking about (and if we don't recurse, we
+        # just give a worse error message)
+        included_directives = _parse_ssl_options(directive[1])
+
+        for included_directive in included_directives:
+            included_dir_loc = find_location(included_directive)
+            included_dir_name = included_directive[0]
+            if not is_whitespace_or_comment(included_directive) \
+                and not can_append(included_dir_loc, included_dir_name):
+                if block[included_dir_loc] != included_directive:
+                    raise errors.MisconfigurationError(err_fmt.format(included_directive,
+                        block[included_dir_loc]))
+                else:
+                    _comment_out_directive(block, included_dir_loc, directive[1])
+
+    if can_append(location, directive_name):
+        block.append(directive)
+        _comment_directive(block, len(block) - 1)
+    elif block[location] != directive:
+        raise errors.MisconfigurationError(err_fmt.format(directive, block[location]))
+
+def _apply_global_addr_ssl(addr_to_ssl, parsed_server):
+    """Apply global sslishness information to the parsed server block
+    """
+    for addr in parsed_server['addrs']:
+        addr.ssl = addr_to_ssl[addr.normalized_tuple()]
+        if addr.ssl:
+            parsed_server['ssl'] = True
+
+def _parse_server_raw(server):
     """Parses a list of server directives.
 
     :param list server: list of directives in a server block
@@ -472,81 +608,25 @@ def parse_server(server):
                      'ssl': False,
                      'names': set()}
 
+    apply_ssl_to_all_addrs = False
+
     for directive in server:
         if not directive:
             continue
         if directive[0] == 'listen':
-            addr = obj.Addr.fromstring(directive[1])
-            parsed_server['addrs'].add(addr)
-            if not parsed_server['ssl'] and addr.ssl:
-                parsed_server['ssl'] = True
+            addr = obj.Addr.fromstring(" ".join(directive[1:]))
+            if addr:
+                parsed_server['addrs'].add(addr)
+                if addr.ssl:
+                    parsed_server['ssl'] = True
         elif directive[0] == 'server_name':
-            parsed_server['names'].update(
-                _get_servernames(directive[1]))
-        elif directive[0] == 'ssl' and directive[1] == 'on':
+            parsed_server['names'].update(directive[1:])
+        elif _is_ssl_on_directive(directive):
             parsed_server['ssl'] = True
+            apply_ssl_to_all_addrs = True
+
+    if apply_ssl_to_all_addrs:
+        for addr in parsed_server['addrs']:
+            addr.ssl = True
 
     return parsed_server
-
-
-def _add_directives(block, directives, replace):
-    """Adds or replaces directives in a config block.
-
-    When replace=False, it's an error to try and add a directive that already
-    exists in the config block with a conflicting value.
-
-    When replace=True, a directive with the same name MUST already exist in the
-    config block, and the first instance will be replaced.
-
-    ..todo :: Find directives that are in included files.
-
-    :param list block: The block to replace in
-    :param list directives: The new directives.
-
-    """
-    for directive in directives:
-        _add_directive(block, directive, replace)
-
-repeatable_directives = set(['server_name', 'listen', 'include'])
-
-def _add_directive(block, directive, replace):
-    """Adds or replaces a single directive in a config block.
-
-    See _add_directives for more documentation.
-
-    """
-    directive = nginxparser.UnspacedList(directive)
-    if len(directive) == 0:
-        # whitespace
-        block.append(directive)
-        return
-    location = -1
-    # Find the index of a config line where the name of the directive matches
-    # the name of the directive we want to add.
-    for index, line in enumerate(block):
-        if len(line) > 0 and line[0] == directive[0]:
-            location = index
-            break
-    if replace:
-        if location == -1:
-            raise errors.MisconfigurationError(
-                'expected directive for %s in the Nginx '
-                'config but did not find it.' % directive[0])
-        block[location] = directive
-    else:
-        # Append directive. Fail if the name is not a repeatable directive name,
-        # and there is already a copy of that directive with a different value
-        # in the config file.
-        directive_name = directive[0]
-        directive_value = directive[1]
-        if location != -1 and directive_name.__str__() not in repeatable_directives:
-            if block[location][1] == directive_value:
-                # There's a conflict, but the existing value matches the one we
-                # want to insert, so it's fine.
-                pass
-            else:
-                raise errors.MisconfigurationError(
-                    'tried to insert directive "%s" but found conflicting "%s".' % (
-                    directive, block[location]))
-        else:
-            block.append(directive)

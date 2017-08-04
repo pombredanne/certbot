@@ -45,7 +45,6 @@ extensions = [
     'sphinx.ext.coverage',
     'sphinx.ext.viewcode',
     'repoze.sphinx.autointerface',
-    'sphinxcontrib.programoutput',
 ]
 
 autodoc_member_order = 'bysource'
@@ -120,6 +119,7 @@ pygments_style = 'sphinx'
 # If true, `todo` and `todoList` produce output, else they produce nothing.
 todo_include_todos = True
 
+suppress_warnings = ['image.nonlocal_uri']
 
 # -- Options for HTML output ----------------------------------------------
 

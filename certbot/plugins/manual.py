@@ -1,204 +1,223 @@
-"""Manual plugin."""
+"""Manual authenticator plugin"""
 import os
-import logging
-import pipes
-import shutil
-import signal
-import socket
-import subprocess
-import sys
-import tempfile
-import time
 
-import six
 import zope.component
 import zope.interface
 
 from acme import challenges
 
-from certbot import errors
 from certbot import interfaces
+from certbot import errors
+from certbot import hooks
+from certbot import reverter
 from certbot.plugins import common
 
 
-logger = logging.getLogger(__name__)
+class ManualTlsSni01(common.TLSSNI01):
+    """TLS-SNI-01 authenticator for the Manual plugin
+
+    :ivar configurator: Authenticator object
+    :type configurator: :class:`~certbot.plugins.manual.Authenticator`
+
+    :ivar list achalls: Annotated
+        class:`~certbot.achallenges.KeyAuthorizationAnnotatedChallenge`
+        challenges
+
+    :param list indices: Meant to hold indices of challenges in a
+        larger array. NginxTlsSni01 is capable of solving many challenges
+        at once which causes an indexing issue within NginxConfigurator
+        who must return all responses in order.  Imagine NginxConfigurator
+        maintaining state about where all of the http-01 Challenges,
+        TLS-SNI-01 Challenges belong in the response array.  This is an
+        optional utility.
+
+    :param str challenge_conf: location of the challenge config file
+    """
+
+    def perform(self):
+        """Create the SSL certificates and private keys"""
+
+        for achall in self.achalls:
+            self._setup_challenge_cert(achall)
 
 
 @zope.interface.implementer(interfaces.IAuthenticator)
 @zope.interface.provider(interfaces.IPluginFactory)
 class Authenticator(common.Plugin):
-    """Manual Authenticator.
+    """Manual authenticator
 
-    This plugin requires user's manual intervention in setting up a HTTP
-    server for solving http-01 challenges and thus does not need to be
-    run as a privileged process. Alternatively shows instructions on how
-    to use Python's built-in HTTP server.
-
-    .. todo:: Support for `~.challenges.TLSSNI01`.
+    This plugin allows the user to perform the domain validation
+    challenge(s) themselves. This either be done manually by the user or
+    through shell scripts provided to Certbot.
 
     """
+
+    description = 'Manual configuration or run your own shell scripts'
     hidden = True
-
-    description = "Manually configure an HTTP server"
-
-    MESSAGE_TEMPLATE = """\
-Make sure your web server displays the following content at
-{uri} before continuing:
+    long_description = (
+        'Authenticate through manual configuration or custom shell scripts. '
+        'When using shell scripts, an authenticator script must be provided. '
+        'The environment variables available to this script depend on the '
+        'type of challenge. $CERTBOT_DOMAIN will always contain the domain '
+        'being authenticated. For HTTP-01 and DNS-01, $CERTBOT_VALIDATION '
+        'is the validation string, and $CERTBOT_TOKEN is the filename of the '
+        'resource requested when performing an HTTP-01 challenge. When '
+        'performing a TLS-SNI-01 challenge, $CERTBOT_SNI_DOMAIN will contain '
+        'the SNI name for which the ACME server expects to be presented with '
+        'the self-signed certificate located at $CERTBOT_CERT_PATH. The '
+        'secret key needed to complete the TLS handshake is located at '
+        '$CERTBOT_KEY_PATH. An additional cleanup script can also be '
+        'provided and can use the additional variable $CERTBOT_AUTH_OUTPUT '
+        'which contains the stdout output from the auth script.')
+    _DNS_INSTRUCTIONS = """\
+Please deploy a DNS TXT record under the name
+{domain} with the following value:
 
 {validation}
 
-If you don't have HTTP server configured, you can run the following
-command on the target server (as root):
+Before continuing, verify the record is deployed."""
+    _HTTP_INSTRUCTIONS = """\
+Create a file containing just this data:
 
-{command}
+{validation}
+
+And make it available on your web server at this URL:
+
+{uri}
 """
-
-    # a disclaimer about your current IP being transmitted to Let's Encrypt's servers.
-    IP_DISCLAIMER = """\
-NOTE: The IP of this machine will be publicly logged as having requested this certificate. \
-If you're running certbot in manual mode on a machine that is not your server, \
-please ensure you're okay with that.
-
-Are you OK with your IP being logged?
+    _TLSSNI_INSTRUCTIONS = """\
+Configure the service listening on port {port} to present the certificate
+{cert}
+using the secret key
+{key}
+when it receives a TLS ClientHello with the SNI extension set to
+{sni_domain}
 """
-
-    # "cd /tmp/certbot" makes sure user doesn't serve /root,
-    # separate "public_html" ensures that cert.pem/key.pem are not
-    # served and makes it more obvious that Python command will serve
-    # anything recursively under the cwd
-
-    CMD_TEMPLATE = """\
-mkdir -p {root}/public_html/{achall.URI_ROOT_PATH}
-cd {root}/public_html
-printf "%s" {validation} > {achall.URI_ROOT_PATH}/{encoded_token}
-# run only once per server:
-$(command -v python2 || command -v python2.7 || command -v python2.6) -c \\
-"import BaseHTTPServer, SimpleHTTPServer; \\
-s = BaseHTTPServer.HTTPServer(('', {port}), SimpleHTTPServer.SimpleHTTPRequestHandler); \\
-s.serve_forever()" """
-    """Command template."""
 
     def __init__(self, *args, **kwargs):
         super(Authenticator, self).__init__(*args, **kwargs)
-        self._root = (tempfile.mkdtemp() if self.conf("test-mode")
-                      else "/tmp/certbot")
-        self._httpd = None
+        self.reverter = reverter.Reverter(self.config)
+        self.reverter.recovery_routine()
+        self.env = dict()
+        self.tls_sni_01 = None
 
     @classmethod
     def add_parser_arguments(cls, add):
-        add("test-mode", action="store_true",
-            help="Test mode. Executes the manual command in subprocess.")
-        add("public-ip-logging-ok", action="store_true",
-            help="Automatically allows public IP logging.")
+        add('auth-hook',
+            help='Path or command to execute for the authentication script')
+        add('cleanup-hook',
+            help='Path or command to execute for the cleanup script')
+        add('public-ip-logging-ok', action='store_true',
+            help='Automatically allows public IP logging (default: Ask)')
 
-    def prepare(self):  # pylint: disable=missing-docstring,no-self-use
-        if self.config.noninteractive_mode and not self.conf("test-mode"):
-            raise errors.PluginError("Running manual mode non-interactively is not supported")
+    def prepare(self):  # pylint: disable=missing-docstring
+        if self.config.noninteractive_mode and not self.conf('auth-hook'):
+            raise errors.PluginError(
+                'An authentication script must be provided with --{0} when '
+                'using the manual plugin non-interactively.'.format(
+                    self.option_name('auth-hook')))
+        self._validate_hooks()
+
+    def _validate_hooks(self):
+        if self.config.validate_hooks:
+            for name in ('auth-hook', 'cleanup-hook'):
+                hook = self.conf(name)
+                if hook is not None:
+                    hook_prefix = self.option_name(name)[:-len('-hook')]
+                    hooks.validate_hook(hook, hook_prefix)
 
     def more_info(self):  # pylint: disable=missing-docstring,no-self-use
-        return ("This plugin requires user's manual intervention in setting "
-                "up an HTTP server for solving http-01 challenges and thus "
-                "does not need to be run as a privileged process. "
-                "Alternatively shows instructions on how to use Python's "
-                "built-in HTTP server.")
+        return (
+            'This plugin allows the user to customize setup for domain '
+            'validation challenges either through shell scripts provided by '
+            'the user or by performing the setup manually.')
 
     def get_chall_pref(self, domain):
         # pylint: disable=missing-docstring,no-self-use,unused-argument
-        return [challenges.HTTP01]
+        return [challenges.HTTP01, challenges.DNS01, challenges.TLSSNI01]
 
     def perform(self, achalls):  # pylint: disable=missing-docstring
+        self._verify_ip_logging_ok()
+        if self.conf('auth-hook'):
+            perform_achall = self._perform_achall_with_script
+        else:
+            perform_achall = self._perform_achall_manually
+
         responses = []
-        # TODO: group achalls by the same socket.gethostbyname(_ex)
-        # and prompt only once per server (one "echo -n" per domain)
         for achall in achalls:
-            responses.append(self._perform_single(achall))
+            if isinstance(achall.chall, challenges.TLSSNI01):
+                # Make a new ManualTlsSni01 instance for each challenge
+                # because the manual plugin deals with one challenge at a time.
+                self.tls_sni_01 = ManualTlsSni01(self)
+                self.tls_sni_01.add_chall(achall)
+                self.tls_sni_01.perform()
+            perform_achall(achall)
+            responses.append(achall.response(achall.account_key))
         return responses
 
-    @classmethod
-    def _test_mode_busy_wait(cls, port):
-        while True:
-            time.sleep(1)
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            try:
-                sock.connect(("localhost", port))
-            except socket.error:  # pragma: no cover
-                pass
+    def _verify_ip_logging_ok(self):
+        if not self.conf('public-ip-logging-ok'):
+            cli_flag = '--{0}'.format(self.option_name('public-ip-logging-ok'))
+            msg = ('NOTE: The IP of this machine will be publicly logged as '
+                   "having requested this certificate. If you're running "
+                   'certbot in manual mode on a machine that is not your '
+                   "server, please ensure you're okay with that.\n\n"
+                   'Are you OK with your IP being logged?')
+            display = zope.component.getUtility(interfaces.IDisplay)
+            if display.yesno(msg, cli_flag=cli_flag, force_interactive=True):
+                setattr(self.config, self.dest('public-ip-logging-ok'), True)
             else:
-                break
-            finally:
-                sock.close()
+                raise errors.PluginError('Must agree to IP logging to proceed')
 
-    def _perform_single(self, achall):
-        # same path for each challenge response would be easier for
-        # users, but will not work if multiple domains point at the
-        # same server: default command doesn't support virtual hosts
-        response, validation = achall.response_and_validation()
-
-        port = (response.port if self.config.http01_port is None
-                else int(self.config.http01_port))
-        command = self.CMD_TEMPLATE.format(
-            root=self._root, achall=achall, response=response,
-            # TODO(kuba): pipes still necessary?
-            validation=pipes.quote(validation),
-            encoded_token=achall.chall.encode("token"),
-            port=port)
-        if self.conf("test-mode"):
-            logger.debug("Test mode. Executing the manual command: %s", command)
-            # sh shipped with OS X does't support echo -n, but supports printf
-            try:
-                self._httpd = subprocess.Popen(
-                    command,
-                    # don't care about setting stdout and stderr,
-                    # we're in test mode anyway
-                    shell=True,
-                    executable=None,
-                    # "preexec_fn" is UNIX specific, but so is "command"
-                    preexec_fn=os.setsid)
-            except OSError as error:  # ValueError should not happen!
-                logger.debug(
-                    "Couldn't execute manual command: %s", error, exc_info=True)
-                return False
-            logger.debug("Manual command running as PID %s.", self._httpd.pid)
-            # give it some time to bootstrap, before we try to verify
-            # (cert generation in case of simpleHttpS might take time)
-            self._test_mode_busy_wait(port)
-            if self._httpd.poll() is not None:
-                raise errors.Error("Couldn't execute manual command")
+    def _perform_achall_with_script(self, achall):
+        env = dict(CERTBOT_DOMAIN=achall.domain,
+                   CERTBOT_VALIDATION=achall.validation(achall.account_key))
+        if isinstance(achall.chall, challenges.HTTP01):
+            env['CERTBOT_TOKEN'] = achall.chall.encode('token')
         else:
-            if not self.conf("public-ip-logging-ok"):
-                if not zope.component.getUtility(interfaces.IDisplay).yesno(
-                        self.IP_DISCLAIMER, "Yes", "No",
-                        cli_flag="--manual-public-ip-logging-ok"):
-                    raise errors.PluginError("Must agree to IP logging to proceed")
+            os.environ.pop('CERTBOT_TOKEN', None)
+        if isinstance(achall.chall, challenges.TLSSNI01):
+            env['CERTBOT_CERT_PATH'] = self.tls_sni_01.get_cert_path(achall)
+            env['CERTBOT_KEY_PATH'] = self.tls_sni_01.get_key_path(achall)
+            env['CERTBOT_SNI_DOMAIN'] = self.tls_sni_01.get_z_domain(achall)
+            os.environ.pop('CERTBOT_VALIDATION', None)
+            env.pop('CERTBOT_VALIDATION')
+        else:
+            os.environ.pop('CERTBOT_CERT_PATH', None)
+            os.environ.pop('CERTBOT_KEY_PATH', None)
+            os.environ.pop('CERTBOT_SNI_DOMAIN', None)
+        os.environ.update(env)
+        _, out = hooks.execute(self.conf('auth-hook'))
+        env['CERTBOT_AUTH_OUTPUT'] = out.strip()
+        self.env[achall.domain] = env
 
-            self._notify_and_wait(self.MESSAGE_TEMPLATE.format(
-                validation=validation, response=response,
-                uri=achall.chall.uri(achall.domain),
-                command=command))
+    def _perform_achall_manually(self, achall):
+        validation = achall.validation(achall.account_key)
+        if isinstance(achall.chall, challenges.HTTP01):
+            msg = self._HTTP_INSTRUCTIONS.format(
+                achall=achall, encoded_token=achall.chall.encode('token'),
+                port=self.config.http01_port,
+                uri=achall.chall.uri(achall.domain), validation=validation)
+        elif isinstance(achall.chall, challenges.DNS01):
+            msg = self._DNS_INSTRUCTIONS.format(
+                domain=achall.validation_domain_name(achall.domain),
+                validation=validation)
+        else:
+            assert isinstance(achall.chall, challenges.TLSSNI01)
+            msg = self._TLSSNI_INSTRUCTIONS.format(
+                cert=self.tls_sni_01.get_cert_path(achall),
+                key=self.tls_sni_01.get_key_path(achall),
+                port=self.config.tls_sni_01_port,
+                sni_domain=self.tls_sni_01.get_z_domain(achall))
+        display = zope.component.getUtility(interfaces.IDisplay)
+        display.notification(msg, wrap=False, force_interactive=True)
 
-        if not response.simple_verify(
-                achall.chall, achall.domain,
-                achall.account_key.public_key(), self.config.http01_port):
-            logger.warning("Self-verify of challenge failed.")
-
-        return response
-
-    def _notify_and_wait(self, message):  # pylint: disable=no-self-use
-        # TODO: IDisplay wraps messages, breaking the command
-        #answer = zope.component.getUtility(interfaces.IDisplay).notification(
-        #    message=message, height=25, pause=True)
-        sys.stdout.write(message)
-        six.moves.input("Press ENTER to continue")
-
-    def cleanup(self, achalls):
-        # pylint: disable=missing-docstring,no-self-use,unused-argument
-        if self.conf("test-mode"):
-            assert self._httpd is not None, (
-                "cleanup() must be called after perform()")
-            if self._httpd.poll() is None:
-                logger.debug("Terminating manual command process")
-                os.killpg(self._httpd.pid, signal.SIGTERM)
-            else:
-                logger.debug("Manual command process already terminated "
-                             "with %s code", self._httpd.returncode)
-            shutil.rmtree(self._root)
+    def cleanup(self, achalls):  # pylint: disable=missing-docstring
+        if self.conf('cleanup-hook'):
+            for achall in achalls:
+                env = self.env.pop(achall.domain)
+                if 'CERTBOT_TOKEN' not in env:
+                    os.environ.pop('CERTBOT_TOKEN', None)
+                os.environ.update(env)
+                hooks.execute(self.conf('cleanup-hook'))
+        self.reverter.recovery_routine()

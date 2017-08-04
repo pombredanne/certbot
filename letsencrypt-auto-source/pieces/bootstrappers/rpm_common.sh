@@ -13,13 +13,39 @@ BootstrapRpmCommon() {
     tool=yum
 
   else
-    echo "Neither yum nor dnf found. Aborting bootstrap!"
+    error "Neither yum nor dnf found. Aborting bootstrap!"
     exit 1
+  fi
+
+  if [ "$ASSUME_YES" = 1 ]; then
+    yes_flag="-y"
+  fi
+  if [ "$QUIET" = 1 ]; then
+    QUIET_FLAG='--quiet'
+  fi
+
+  if ! $SUDO $tool list *virtualenv >/dev/null 2>&1; then
+    echo "To use Certbot, packages from the EPEL repository need to be installed."
+    if ! $SUDO $tool list epel-release >/dev/null 2>&1; then
+      error "Enable the EPEL repository and try running Certbot again."
+      exit 1
+    fi
+    if [ "$ASSUME_YES" = 1 ]; then
+      /bin/echo -n "Enabling the EPEL repository in 3 seconds..."
+      sleep 1s
+      /bin/echo -ne "\e[0K\rEnabling the EPEL repository in 2 seconds..."
+      sleep 1s
+      /bin/echo -e "\e[0K\rEnabling the EPEL repository in 1 seconds..."
+      sleep 1s
+    fi
+    if ! $SUDO $tool install $yes_flag $QUIET_FLAG epel-release; then
+      error "Could not enable EPEL. Aborting bootstrap!"
+      exit 1
+    fi
   fi
 
   pkgs="
     gcc
-    dialog
     augeas-libs
     openssl
     openssl-devel
@@ -54,12 +80,8 @@ BootstrapRpmCommon() {
     "
   fi
 
-  if [ "$ASSUME_YES" = 1 ]; then
-    yes_flag="-y"
-  fi
-
-  if ! $SUDO $tool install $yes_flag $pkgs; then
-      echo "Could not install OS dependencies. Aborting bootstrap!"
-      exit 1
+  if ! $SUDO $tool install $yes_flag $QUIET_FLAG $pkgs; then
+    error "Could not install OS dependencies. Aborting bootstrap!"
+    exit 1
   fi
 }

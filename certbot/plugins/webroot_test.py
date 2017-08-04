@@ -21,7 +21,7 @@ from certbot import errors
 from certbot.display import util as display_util
 
 from certbot.tests import acme_util
-from certbot.tests import test_util
+from certbot.tests import util as test_util
 
 
 KEY = jose.JWKRSA.load(test_util.load_vector("rsa512_key.pem"))
@@ -61,7 +61,7 @@ class AuthenticatorTest(unittest.TestCase):
     def test_prepare(self):
         self.auth.prepare()  # shouldn't raise any exceptions
 
-    @mock.patch("certbot.plugins.webroot.zope.component.getUtility")
+    @test_util.patch_get_utility()
     def test_webroot_from_list(self, mock_get_utility):
         self.config.webroot_path = []
         self.config.webroot_map = {"otherthing.com": self.path}
@@ -78,16 +78,14 @@ class AuthenticatorTest(unittest.TestCase):
         self.assertEqual(self.config.webroot_map[self.achall.domain],
                          self.path)
 
-    @mock.patch("certbot.plugins.webroot.zope.component.getUtility")
+    @test_util.patch_get_utility()
     def test_webroot_from_list_help_and_cancel(self, mock_get_utility):
         self.config.webroot_path = []
         self.config.webroot_map = {"otherthing.com": self.path}
 
         mock_display = mock_get_utility()
-        mock_display.menu.side_effect = ((display_util.HELP, -1),
-                                         (display_util.CANCEL, -1),)
+        mock_display.menu.side_effect = ((display_util.CANCEL, -1),)
         self.assertRaises(errors.PluginError, self.auth.perform, [self.achall])
-        self.assertTrue(mock_display.notification.called)
         self.assertTrue(mock_display.menu.called)
         for call in mock_display.menu.call_args_list:
             self.assertTrue(self.achall.domain in call[0][0])
@@ -95,28 +93,20 @@ class AuthenticatorTest(unittest.TestCase):
                 webroot in call[0][1]
                 for webroot in six.itervalues(self.config.webroot_map)))
 
-    @mock.patch("certbot.plugins.webroot.zope.component.getUtility")
+    @test_util.patch_get_utility()
     def test_new_webroot(self, mock_get_utility):
         self.config.webroot_path = []
         self.config.webroot_map = {}
 
-        imaginary_dir = os.path.join(os.sep, "imaginary", "dir")
-
         mock_display = mock_get_utility()
         mock_display.menu.return_value = (display_util.OK, 0,)
-        mock_display.directory_select.side_effect = (
-            (display_util.HELP, -1,), (display_util.CANCEL, -1,),
-            (display_util.OK, imaginary_dir,), (display_util.OK, self.path,),)
-        self.auth.perform([self.achall])
+        with mock.patch('certbot.display.ops.validated_directory') as m:
+            m.side_effect = ((display_util.CANCEL, -1),
+                             (display_util.OK, self.path,))
 
-        self.assertTrue(mock_display.notification.called)
-        for call in mock_display.notification.call_args_list:
-            self.assertTrue(imaginary_dir in call[0][0] or
-                            display_util.DSELECT_HELP == call[0][0])
+            self.auth.perform([self.achall])
 
-        self.assertTrue(mock_display.directory_select.called)
-        for call in mock_display.directory_select.call_args_list:
-            self.assertTrue(self.achall.domain in call[0][0])
+        self.assertEqual(self.config.webroot_map[self.achall.domain], self.path)
 
     def test_perform_missing_root(self):
         self.config.webroot_path = None

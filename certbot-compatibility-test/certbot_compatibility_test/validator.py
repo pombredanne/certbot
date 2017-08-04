@@ -4,6 +4,8 @@ import socket
 import requests
 import zope.interface
 
+import six
+
 from acme import crypto_util
 from acme import errors as acme_errors
 from certbot import interfaces
@@ -19,7 +21,14 @@ class Validator(object):
 
     def certificate(self, cert, name, alt_host=None, port=443):
         """Verifies the certificate presented at name is cert"""
-        host = alt_host if alt_host else socket.gethostbyname(name)
+        if alt_host is None:
+            host = socket.gethostbyname(name)
+        elif isinstance(alt_host, six.binary_type):
+            host = alt_host
+        else:
+            host = alt_host.encode()
+        name = name if isinstance(name, six.binary_type) else name.encode()
+
         try:
             presented_cert = crypto_util.probe_sni(name, host, port)
         except acme_errors.Error as error:
@@ -36,10 +45,10 @@ class Validator(object):
         else:
             response = requests.get(url, allow_redirects=False)
 
-        if response.status_code not in (301, 303):
-            return False
-
         redirect_location = response.headers.get("location", "")
+        # We're checking that the redirect we added behaves correctly.
+        # It's okay for some server configuration to redirect to an
+        # http URL, as long as it's on some other domain.
         if not redirect_location.startswith("https://"):
             return False
 
@@ -48,6 +57,16 @@ class Validator(object):
             return False
 
         return True
+
+    def any_redirect(self, name, port=80, headers=None):
+        """Test whether webserver redirects."""
+        url = "http://{0}:{1}".format(name, port)
+        if headers:
+            response = requests.get(url, headers=headers, allow_redirects=False)
+        else:
+            response = requests.get(url, allow_redirects=False)
+
+        return response.status_code in xrange(300, 309)
 
     def hsts(self, name):
         """Test for HTTP Strict Transport Security header"""

@@ -12,6 +12,12 @@ from certbot import constants
 from certbot import errors
 from certbot import interfaces
 
+try:
+    from collections import OrderedDict
+except ImportError:  # pragma: no cover
+    # OrderedDict was added in Python 2.7
+    from ordereddict import OrderedDict  # pylint: disable=import-error
+
 
 logger = logging.getLogger(__name__)
 
@@ -22,12 +28,22 @@ class PluginEntryPoint(object):
     PREFIX_FREE_DISTRIBUTIONS = [
         "certbot",
         "certbot-apache",
+        "certbot-dns-cloudflare",
+        "certbot-dns-cloudxns",
+        "certbot-dns-digitalocean",
+        "certbot-dns-dnsimple",
+        "certbot-dns-dnsmadeeasy",
+        "certbot-dns-google",
+        "certbot-dns-luadns",
+        "certbot-dns-nsone",
+        "certbot-dns-rfc2136",
+        "certbot-dns-route53",
         "certbot-nginx",
     ]
     """Distributions for which prefix will be omitted."""
 
     # this object is mutable, don't allow it to be hashed!
-    __hash__ = None
+    __hash__ = None  # type: ignore
 
     def __init__(self, entry_point):
         self.name = self.entry_point_to_plugin_name(entry_point)
@@ -54,6 +70,14 @@ class PluginEntryPoint(object):
         return "{0} ({1})".format(self.description, self.name)
 
     @property
+    def long_description(self):
+        """Long description of the plugin."""
+        try:
+            return self.plugin_cls.long_description
+        except AttributeError:
+            return self.description
+
+    @property
     def hidden(self):
         """Should this plugin be hidden from UI?"""
         return getattr(self.plugin_cls, "hidden", False)
@@ -71,7 +95,7 @@ class PluginEntryPoint(object):
         return self._initialized is not None
 
     def init(self, config=None):
-        """Memoized plugin inititialization."""
+        """Memoized plugin initialization."""
         if not self.initialized:
             self.entry_point.require()  # fetch extras!
             self._initialized = self.plugin_cls(config, self.name)
@@ -160,7 +184,11 @@ class PluginsRegistry(collections.Mapping):
     """Plugins registry."""
 
     def __init__(self, plugins):
-        self._plugins = plugins
+        # plugins are sorted so the same order is used between runs.
+        # This prevents deadlock caused by plugins acquiring a lock
+        # and ensures at least one concurrent Certbot instance will run
+        # successfully.
+        self._plugins = OrderedDict(sorted(six.iteritems(plugins)))
 
     @classmethod
     def find_all(cls):
@@ -222,7 +250,7 @@ class PluginsRegistry(collections.Mapping):
     def available(self):
         """Filter plugins based on availability."""
         return self.filter(lambda p_ep: p_ep.available)
-        # succefully prepared + misconfigured
+        # successfully prepared + misconfigured
 
     def find_init(self, plugin):
         """Find an initialized plugin.
@@ -255,4 +283,4 @@ class PluginsRegistry(collections.Mapping):
     def __str__(self):
         if not self._plugins:
             return "No plugins"
-        return "\n\n".join(str(p_ep) for p_ep in self._plugins.itervalues())
+        return "\n\n".join(str(p_ep) for p_ep in six.itervalues(self._plugins))

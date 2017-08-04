@@ -47,7 +47,9 @@ class AugeasConfigurator(common.Plugin):
             loadpath=constants.AUGEAS_LENS_DIR,
             # Do not save backup (we do it ourselves), do not load
             # anything by default
-            flags=(augeas.Augeas.NONE | augeas.Augeas.NO_MODL_AUTOLOAD))
+            flags=(augeas.Augeas.NONE |
+                   augeas.Augeas.NO_MODL_AUTOLOAD |
+                   augeas.Augeas.ENABLE_SPAN))
         self.recovery_routine()
 
     def check_parsing_errors(self, lens):
@@ -68,9 +70,12 @@ class AugeasConfigurator(common.Plugin):
             # As aug.get may return null
             if lens_path and lens in lens_path:
                 msg = (
-                    "There has been an error in parsing the file (%s): %s",
+                    "There has been an error in parsing the file {0} on line {1}: "
+                    "{2}".format(
                     # Strip off /augeas/files and /error
-                    path[13:len(path) - 6], self.aug.get(path + "/message"))
+                    path[13:len(path) - 6],
+                    self.aug.get(path + "/line"),
+                    self.aug.get(path + "/message")))
                 raise errors.PluginError(msg)
 
     # TODO: Cleanup this function
@@ -115,8 +120,8 @@ class AugeasConfigurator(common.Plugin):
 
         # If the augeas tree didn't change, no files were saved and a backup
         # should not be created
+        save_files = set()
         if save_paths:
-            save_files = set()
             for path in save_paths:
                 save_files.add(self.aug.get(path)[6:])
 
@@ -135,6 +140,12 @@ class AugeasConfigurator(common.Plugin):
         self.save_notes = ""
         self.aug.save()
 
+        # Force reload if files were modified
+        # This is needed to recalculate augeas directive span
+        if save_files:
+            for sf in save_files:
+                self.aug.remove("/files/"+sf)
+            self.aug.load()
         if title and not temporary:
             try:
                 self.reverter.finalize_checkpoint(title)

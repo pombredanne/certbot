@@ -1,8 +1,11 @@
 """Module contains classes used by the Nginx Configurator."""
 import re
 
+import six
+
 from certbot.plugins import common
 
+REDIRECT_DIRECTIVES = ['return', 'rewrite']
 
 class Addr(common.Addr):
     r"""Represents an Nginx address, i.e. what comes after the 'listen'
@@ -28,10 +31,14 @@ class Addr(common.Addr):
     :param bool default: Whether the directive includes 'default_server'
 
     """
+    UNSPECIFIED_IPV4_ADDRESSES = ('', '*', '0.0.0.0')
+    CANONICAL_UNSPECIFIED_ADDRESS = UNSPECIFIED_IPV4_ADDRESSES[0]
+
     def __init__(self, host, port, ssl, default):
         super(Addr, self).__init__((host, port))
         self.ssl = ssl
         self.default = default
+        self.unspecified_address = host in self.UNSPECIFIED_IPV4_ADDRESSES
 
     @classmethod
     def fromstring(cls, str_addr):
@@ -69,7 +76,8 @@ class Addr(common.Addr):
 
         return cls(host, port, ssl, default)
 
-    def __str__(self):
+    def to_string(self, include_default=True):
+        """Return string representation of Addr"""
         parts = ''
         if self.tup[0] and self.tup[1]:
             parts = "%s:%s" % self.tup
@@ -78,19 +86,41 @@ class Addr(common.Addr):
         else:
             parts = self.tup[1]
 
-        if self.default:
+        if self.default and include_default:
             parts += ' default_server'
         if self.ssl:
             parts += ' ssl'
 
         return parts
 
+    def __str__(self):
+        return self.to_string()
+
     def __repr__(self):
         return "Addr(" + self.__str__() + ")"
 
+    def __hash__(self):
+        # Python 3 requires explicit overridden for __hash__
+        # See certbot-apache/certbot_apache/obj.py for more information
+        return super(Addr, self).__hash__()
+
+    def super_eq(self, other):
+        """Check ip/port equality, with IPv6 support.
+        """
+        # If both addresses got an unspecified address, then make sure the
+        # host representation in each match when doing the comparison.
+        if self.unspecified_address and other.unspecified_address:
+            return common.Addr((self.CANONICAL_UNSPECIFIED_ADDRESS,
+                                self.tup[1]), self.ipv6) == \
+                   common.Addr((other.CANONICAL_UNSPECIFIED_ADDRESS,
+                                other.tup[1]), other.ipv6)
+        # Nginx plugin currently doesn't support IPv6 but this will
+        # future-proof it
+        return super(Addr, self).__eq__(other)
+
     def __eq__(self, other):
         if isinstance(other, self.__class__):
-            return (self.tup == other.tup and
+            return (self.super_eq(other) and
                     self.ssl == other.ssl and
                     self.default == other.default)
         return False
@@ -107,10 +137,12 @@ class VirtualHost(object):  # pylint: disable=too-few-public-methods
 
     :ivar bool ssl: SSLEngine on in vhost
     :ivar bool enabled: Virtual host is enabled
+    :ivar list path: The indices into the parsed file used to access
+        the server block defining the vhost
 
     """
 
-    def __init__(self, filep, addrs, ssl, enabled, names, raw):
+    def __init__(self, filep, addrs, ssl, enabled, names, raw, path):
         # pylint: disable=too-many-arguments
         """Initialize a VH."""
         self.filep = filep
@@ -119,15 +151,18 @@ class VirtualHost(object):  # pylint: disable=too-few-public-methods
         self.ssl = ssl
         self.enabled = enabled
         self.raw = raw
+        self.path = path
 
     def __str__(self):
-        addr_str = ", ".join(str(addr) for addr in self.addrs)
+        addr_str = ", ".join(str(addr) for addr in sorted(self.addrs, key=str))
+        # names might be a set, and it has different representations in Python
+        # 2 and 3. Force it to be a list here for consistent outputs
         return ("file: %s\n"
                 "addrs: %s\n"
                 "names: %s\n"
                 "ssl: %s\n"
                 "enabled: %s" % (self.filep, addr_str,
-                                 self.names, self.ssl, self.enabled))
+                                 list(self.names), self.ssl, self.enabled))
 
     def __repr__(self):
         return "VirtualHost(" + self.__str__().replace("\n", ", ") + ")\n"
@@ -135,8 +170,39 @@ class VirtualHost(object):  # pylint: disable=too-few-public-methods
     def __eq__(self, other):
         if isinstance(other, self.__class__):
             return (self.filep == other.filep and
-                    list(self.addrs) == list(other.addrs) and
+                    sorted(self.addrs, key=str) == sorted(other.addrs, key=str) and
                     self.names == other.names and
-                    self.ssl == other.ssl and self.enabled == other.enabled)
+                    self.ssl == other.ssl and
+                    self.enabled == other.enabled and
+                    self.path == other.path)
 
         return False
+
+    def has_redirect(self):
+        """Determine if this vhost has a redirecting statement
+        """
+        for directive_name in REDIRECT_DIRECTIVES:
+            found = _find_directive(self.raw, directive_name)
+            if found is not None:
+                return True
+        return False
+
+    def contains_list(self, test):
+        """Determine if raw server block contains test list at top level
+        """
+        for i in six.moves.range(0, len(self.raw) - len(test)):
+            if self.raw[i:i + len(test)] == test:
+                return True
+        return False
+
+def _find_directive(directives, directive_name):
+    """Find a directive of type directive_name in directives
+    """
+    if not directives or isinstance(directives, str) or len(directives) == 0:
+        return None
+
+    if directives[0] == directive_name:
+        return directives
+
+    matches = (_find_directive(line, directive_name) for line in directives)
+    return next((m for m in matches if m is not None), None)

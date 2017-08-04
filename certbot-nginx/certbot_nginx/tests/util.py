@@ -2,6 +2,7 @@
 import copy
 import os
 import pkg_resources
+import tempfile
 import unittest
 
 import mock
@@ -11,12 +12,12 @@ from acme import jose
 
 from certbot import configuration
 
-from certbot.tests import test_util
+from certbot.tests import util as test_util
 
 from certbot.plugins import common
 
-from certbot_nginx import constants
 from certbot_nginx import configurator
+from certbot_nginx import nginxparser
 
 
 class NginxTest(unittest.TestCase):  # pylint: disable=too-few-public-methods
@@ -26,10 +27,7 @@ class NginxTest(unittest.TestCase):  # pylint: disable=too-few-public-methods
 
         self.temp_dir, self.config_dir, self.work_dir = common.dir_setup(
             "etc_nginx", "certbot_nginx.tests")
-
-        self.ssl_options = common.setup_ssl_options(
-            self.config_dir, constants.MOD_SSL_CONF_SRC,
-            constants.MOD_SSL_CONF_DEST)
+        self.logs_dir = tempfile.mkdtemp('logs')
 
         self.config_path = os.path.join(self.temp_dir, "etc_nginx")
 
@@ -45,7 +43,7 @@ def get_data_filename(filename):
 
 
 def get_nginx_configurator(
-        config_path, config_dir, work_dir, version=(1, 6, 2)):
+        config_path, config_dir, work_dir, logs_dir, version=(1, 6, 2)):
     """Create an Nginx Configurator with the specified options."""
 
     backups = os.path.join(work_dir, "backups")
@@ -61,6 +59,7 @@ def get_nginx_configurator(
                     le_vhost_ext="-le-ssl.conf",
                     config_dir=config_dir,
                     work_dir=work_dir,
+                    logs_dir=logs_dir,
                     backup_dir=backups,
                     temp_checkpoint_dir=os.path.join(work_dir, "temp_checkpoints"),
                     in_progress_dir=os.path.join(backups, "IN_PROGRESS"),
@@ -84,14 +83,20 @@ def filter_comments(tree):
     def traverse(tree):
         """Generator dropping comment nodes"""
         for entry in tree:
-            key, values = entry
+            # key, values = entry
+            spaceless = [e for e in entry if not nginxparser.spacey(e)]
+            if spaceless:
+                key = spaceless[0]
+                values = spaceless[1] if len(spaceless) > 1 else None
+            else:
+                key = values = ""
             if isinstance(key, list):
                 new = copy.deepcopy(entry)
                 new[1] = filter_comments(values)
                 yield new
             else:
-                if key != '#':
-                    yield entry
+                if key != '#' and spaceless:
+                    yield spaceless
 
     return list(traverse(tree))
 
@@ -104,7 +109,7 @@ def contains_at_depth(haystack, needle, n):
     """
     # Specifically use hasattr rather than isinstance(..., collections.Iterable)
     # because we want to include lists but reject strings.
-    if not hasattr(haystack, '__iter__'):
+    if not hasattr(haystack, '__iter__') or hasattr(haystack, 'strip'):
         return False
     if n == 0:
         return needle in haystack

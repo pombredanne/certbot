@@ -8,7 +8,6 @@ import six
 
 class ReporterTest(unittest.TestCase):
     """Tests for certbot.reporter.Reporter."""
-
     def setUp(self):
         from certbot import reporter
         self.reporter = reporter.Reporter(mock.MagicMock(quiet=False))
@@ -21,7 +20,7 @@ class ReporterTest(unittest.TestCase):
 
     def test_multiline_message(self):
         self.reporter.add_message("Line 1\nLine 2", self.reporter.LOW_PRIORITY)
-        self.reporter.atexit_print_messages()
+        self.reporter.print_messages()
         output = sys.stdout.getvalue()
         self.assertTrue("Line 1\n" in output)
         self.assertTrue("Line 2" in output)
@@ -38,15 +37,6 @@ class ReporterTest(unittest.TestCase):
         except ValueError:
             self.reporter.print_messages()
         self.assertEqual(sys.stdout.getvalue(), "")
-
-    def test_atexit_print_messages(self):
-        self._add_messages()
-        self.reporter.atexit_print_messages()
-        output = sys.stdout.getvalue()
-        self.assertTrue("IMPORTANT NOTES:" in output)
-        self.assertTrue("High" in output)
-        self.assertTrue("Med" in output)
-        self.assertTrue("Low" in output)
 
     def test_tty_successful_exit(self):
         sys.stdout.isatty = lambda: True

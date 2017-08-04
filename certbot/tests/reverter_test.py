@@ -1,6 +1,5 @@
 """Test certbot.reverter."""
 import csv
-import itertools
 import logging
 import os
 import shutil
@@ -8,8 +7,11 @@ import tempfile
 import unittest
 
 import mock
+import six
 
 from certbot import errors
+
+from certbot.tests import util as test_util
 
 
 class ReverterCheckpointLocalTest(unittest.TestCase):
@@ -153,7 +155,7 @@ class ReverterCheckpointLocalTest(unittest.TestCase):
 
         act_coms = get_undo_commands(self.config.temp_checkpoint_dir)
 
-        for a_com, com in itertools.izip(act_coms, coms):
+        for a_com, com in six.moves.zip(act_coms, coms):
             self.assertEqual(a_com, com)
 
     def test_bad_register_undo_command(self):
@@ -375,7 +377,7 @@ class TestFullCheckpointsReverter(unittest.TestCase):
         self.assertEqual(read_in(self.config2), "directive-dir2")
         self.assertFalse(os.path.isfile(config3))
 
-    @mock.patch("certbot.reverter.zope.component.getUtility")
+    @test_util.patch_get_utility()
     def test_view_config_changes(self, mock_output):
         """This is not strict as this is subject to change."""
         self._setup_three_checkpoints()
@@ -392,7 +394,7 @@ class TestFullCheckpointsReverter(unittest.TestCase):
         self.assertTrue(mock_logger.info.call_count > 0)
 
     def test_view_config_changes_bad_backups_dir(self):
-        # There shouldn't be any "in progess directories when this is called
+        # There shouldn't be any "in progress directories when this is called
         # It must just be clean checkpoints
         os.makedirs(os.path.join(self.config.backup_dir, "in_progress"))
 

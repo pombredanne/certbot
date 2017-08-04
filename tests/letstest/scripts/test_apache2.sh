@@ -17,6 +17,7 @@ then
     CONFFILE=/etc/httpd/conf/httpd.conf
     sudo setenforce 0 || true #disable selinux
     sudo yum -y install httpd
+    sudo yum -y install nghttp2 || echo this is probably ok but see https://bugzilla.redhat.com/show_bug.cgi?id=1358875
     sudo service httpd start
     sudo mkdir -p /var/www/$PUBLIC_HOSTNAME/public_html
     sudo chmod -R oug+rwx /var/www
@@ -44,7 +45,7 @@ if [ $? -ne 0 ] ; then
     exit 1
 fi
 
-tools/venv.sh
+tools/_venv_common.sh -e acme[dev] -e .[dev,docs] -e certbot-apache
 sudo venv/bin/certbot -v --debug --text --agree-dev-preview --agree-tos \
                    --renew-by-default --redirect --register-unsafely-without-email \
                    --domain $PUBLIC_HOSTNAME --server $BOULDER_URL

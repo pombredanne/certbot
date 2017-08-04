@@ -13,7 +13,7 @@ from certbot.display import util as display_util
 
 from certbot.plugins import common
 
-from certbot.tests import test_util
+from certbot.tests import util as test_util
 
 from certbot_apache import configurator
 from certbot_apache import constants
@@ -31,10 +31,6 @@ class ApacheTest(unittest.TestCase):  # pylint: disable=too-few-public-methods
         self.temp_dir, self.config_dir, self.work_dir = common.dir_setup(
             test_dir=test_dir,
             pkg="certbot_apache.tests")
-
-        self.ssl_options = common.setup_ssl_options(
-            self.config_dir, constants.os_constant("MOD_SSL_CONF_SRC"),
-            constants.MOD_SSL_CONF_DEST)
 
         self.config_path = os.path.join(self.temp_dir, config_root)
         self.vhost_path = os.path.join(self.temp_dir, vhost_root)
@@ -64,7 +60,8 @@ class ParserTest(ApacheTest):  # pytlint: disable=too-few-public-methods
               vhost_root="debian_apache_2_4/multiple_vhosts/apache2/sites-available"):
         super(ParserTest, self).setUp(test_dir, config_root, vhost_root)
 
-        zope.component.provideUtility(display_util.FileDisplay(sys.stdout))
+        zope.component.provideUtility(display_util.FileDisplay(sys.stdout,
+                                                               False))
 
         from certbot_apache.parser import ApacheParser
         self.aug = augeas.Augeas(
@@ -163,5 +160,35 @@ def get_vh_truth(temp_dir, config_name):
                 set([obj.Addr.fromstring("10.2.3.4:443")]), True, True,
                 "ocspvhost.com")]
         return vh_truth
-
+    if config_name == "debian_apache_2_4/multi_vhosts":
+        prefix = os.path.join(
+            temp_dir, config_name, "apache2/sites-available")
+        aug_pre = "/files" + prefix
+        vh_truth = [
+            obj.VirtualHost(
+                os.path.join(prefix, "default.conf"),
+                os.path.join(aug_pre, "default.conf/VirtualHost[1]"),
+                set([obj.Addr.fromstring("*:80")]),
+                False, True, "ip-172-30-0-17"),
+            obj.VirtualHost(
+                os.path.join(prefix, "default.conf"),
+                os.path.join(aug_pre, "default.conf/VirtualHost[2]"),
+                set([obj.Addr.fromstring("*:80")]),
+                False, True, "banana.vomit.com"),
+            obj.VirtualHost(
+                os.path.join(prefix, "multi-vhost.conf"),
+                os.path.join(aug_pre, "multi-vhost.conf/VirtualHost[1]"),
+                set([obj.Addr.fromstring("*:80")]),
+                False, True, "1.multi.vhost.tld"),
+            obj.VirtualHost(
+                os.path.join(prefix, "multi-vhost.conf"),
+                os.path.join(aug_pre, "multi-vhost.conf/IfModule/VirtualHost"),
+                set([obj.Addr.fromstring("*:80")]),
+                False, True, "2.multi.vhost.tld"),
+            obj.VirtualHost(
+                os.path.join(prefix, "multi-vhost.conf"),
+                os.path.join(aug_pre, "multi-vhost.conf/VirtualHost[2]"),
+                set([obj.Addr.fromstring("*:80")]),
+                False, True, "3.multi.vhost.tld")]
+        return vh_truth
     return None  # pragma: no cover

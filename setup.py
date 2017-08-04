@@ -31,6 +31,9 @@ changes = read_file(os.path.join(here, 'CHANGES.rst'))
 version = meta['version']
 
 # Please update tox.ini when modifying dependency version requirements
+# This package relies on requests, however, it isn't specified here to avoid
+# masking the more specific request requirements in acme. See
+# https://github.com/pypa/pip/issues/988 for more info.
 install_requires = [
     'acme=={0}'.format(version),
     # We technically need ConfigArgParse 0.10.0 for Python 2.6 support, but
@@ -38,7 +41,8 @@ install_requires = [
     # in which we added 2.6 support (see #2243), so we relax the requirement.
     'ConfigArgParse>=0.9.3',
     'configobj',
-    'cryptography>=0.7',  # load_pem_x509_certificate
+    'cryptography>=1.2',  # load_pem_x509_certificate
+    'mock',
     'parsedatetime>=1.3',  # Calendar.parseDT
     'PyOpenSSL',
     'pyrfc3339',
@@ -51,30 +55,19 @@ install_requires = [
     'zope.interface',
 ]
 
-# Debian squeeze support, cf. #280
-if sys.version_info[0] == 2:
-    install_requires.append('python2-pythondialog>=3.2.2rc1')
-else:
-    install_requires.append('pythondialog>=3.2.2rc1')
-
-# env markers in extras_require cause problems with older pip: #517
-# Keep in sync with conditional_requirements.py.
+# env markers cause problems with older pip and setuptools
 if sys.version_info < (2, 7):
     install_requires.extend([
-        # only some distros recognize stdlib argparse as already satisfying
         'argparse',
-        'mock<1.1.0',
+        'ordereddict',
     ])
-else:
-    install_requires.append('mock')
 
 dev_extras = [
     # Pin astroid==1.3.5, pylint==1.4.2 as a workaround for #289
     'astroid==1.3.5',
     'coverage',
+    'ipdb',
     'nose',
-    'pep8',
-    'psutil>=2.2.1',  # for tests, optional
     'pylint==1.4.2',  # upstream #248
     'tox',
     'twine',
@@ -83,9 +76,9 @@ dev_extras = [
 
 docs_extras = [
     'repoze.sphinx.autointerface',
-    'Sphinx>=1.0',  # autodoc_member_order = 'bysource', autodoc_default_flags
+    # autodoc_member_order = 'bysource', autodoc_default_flags, and #4686
+    'Sphinx >=1.0,<=1.5.6',
     'sphinx_rtd_theme',
-    'sphinxcontrib-programoutput',
 ]
 
 setup(
@@ -108,6 +101,11 @@ setup(
         'Programming Language :: Python :: 2',
         'Programming Language :: Python :: 2.6',
         'Programming Language :: Python :: 2.7',
+        'Programming Language :: Python :: 3',
+        'Programming Language :: Python :: 3.3',
+        'Programming Language :: Python :: 3.4',
+        'Programming Language :: Python :: 3.5',
+        'Programming Language :: Python :: 3.6',
         'Topic :: Internet :: WWW/HTTP',
         'Topic :: Security',
         'Topic :: System :: Installation/Setup',

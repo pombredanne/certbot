@@ -4,70 +4,126 @@ cache:
     directories:
         - $HOME/.cache/pip
 
-# This makes sure we get a host with docker-compose present.
-dist: trusty
-
 before_install:
-  - 'dpkg -s libaugeas0'
+  - '[ $TRAVIS_OS_NAME == linux ] && dpkg -s libaugeas0 || brew install augeas python3'
+
+before_script:
+  - 'if [ $TRAVIS_OS_NAME = osx ] ; then ulimit -n 1024 ; fi'
 
 # using separate envs with different TOXENVs creates 4x1 Travis build
 # matrix, which allows us to clearly distinguish which component under
 # test has failed
-env:
-  global:
-    - BOULDERPATH=$PWD/boulder/
-
 matrix:
   include:
-    - python: "2.6"
-      env: TOXENV=py26 BOULDER_INTEGRATION=1
-      sudo: true
-      after_failure:
-        - sudo cat /var/log/mysql/error.log
-        - ps aux | grep mysql
-    - python: "2.6"
-      env: TOXENV=py26-oldest BOULDER_INTEGRATION=1
-      sudo: true
-      after_failure:
-        - sudo cat /var/log/mysql/error.log
-        - ps aux | grep mysql
     - python: "2.7"
-      env: TOXENV=apacheconftest
-      sudo: required
-    - python: "2.7"
-      env: TOXENV=py27 BOULDER_INTEGRATION=1
-      sudo: true
-      after_failure:
-        - sudo cat /var/log/mysql/error.log
-        - ps aux | grep mysql
-    - python: "2.7"
-      env: TOXENV=py27-oldest BOULDER_INTEGRATION=1
-      sudo: true
-      after_failure:
-        - sudo cat /var/log/mysql/error.log
-        - ps aux | grep mysql
+      env: TOXENV=cover
     - python: "2.7"
       env: TOXENV=lint
+    - python: "2.7"
+      env: TOXENV=py27-oldest BOULDER_INTEGRATION=1
+      sudo: required
+      after_failure:
+        - sudo cat /var/log/mysql/error.log
+        - ps aux | grep mysql
+      services: docker
+    - python: "2.6"
+      env: TOXENV=py26 BOULDER_INTEGRATION=1
+      sudo: required
+      after_failure:
+        - sudo cat /var/log/mysql/error.log
+        - ps aux | grep mysql
+      services: docker
+    - python: "2.7"
+      env: TOXENV=py27_install BOULDER_INTEGRATION=1
+      sudo: required
+      after_failure:
+        - sudo cat /var/log/mysql/error.log
+        - ps aux | grep mysql
+      services: docker
     - sudo: required
-      env: TOXENV=le_auto
+      env: TOXENV=apache_compat
+      services: docker
+      before_install:
+      addons:
+    - sudo: required
+      env: TOXENV=nginx_compat
+      services: docker
+      before_install:
+      addons:
+    - sudo: required
+      env: TOXENV=le_auto_precise
+      services: docker
+      before_install:
+      addons:
+    - sudo: required
+      env: TOXENV=le_auto_trusty
+      services: docker
+      before_install:
+      addons:
+    - sudo: required
+      env: TOXENV=le_auto_wheezy
+      services: docker
+      before_install:
+      addons:
+    - sudo: required
+      env: TOXENV=le_auto_centos6
+      services: docker
+      before_install:
+      addons:
+    - sudo: required
+      env: TOXENV=docker_dev
       services: docker
       before_install:
       addons:
     - python: "2.7"
-      env: TOXENV=cover
+      env: TOXENV=apacheconftest
+      sudo: required
     - python: "3.3"
-      env: TOXENV=py33
+      env: TOXENV=py33 BOULDER_INTEGRATION=1
+      sudo: required
+      after_failure:
+        - sudo cat /var/log/mysql/error.log
+        - ps aux | grep mysql
+      services: docker
     - python: "3.4"
-      env: TOXENV=py34
+      env: TOXENV=py34 BOULDER_INTEGRATION=1
+      sudo: required
+      after_failure:
+        - sudo cat /var/log/mysql/error.log
+        - ps aux | grep mysql
+      services: docker
     - python: "3.5"
-      env: TOXENV=py35
+      env: TOXENV=py35 BOULDER_INTEGRATION=1
+      sudo: required
+      after_failure:
+        - sudo cat /var/log/mysql/error.log
+        - ps aux | grep mysql
+      services: docker
+    - python: "3.6"
+      env: TOXENV=py36 BOULDER_INTEGRATION=1
+      sudo: required
+      after_failure:
+        - sudo cat /var/log/mysql/error.log
+        - ps aux | grep mysql
+      services: docker
+    - python: "2.7"
+      env: TOXENV=nginxroundtrip
+    - language: generic
+      env: TOXENV=py27
+      os: osx
+    - language: generic
+      env: TOXENV=py36
+      os: osx
+
 
 # Only build pushes to the master branch, PRs, and branches beginning with
-# `test-`. This reduces the number of simultaneous Travis runs, which speeds
-# turnaround time on review since there is a cap of 5 simultaneous runs.
+# `test-` or of the form `digit(s).digit(s).x`. This reduces the number of
+# simultaneous Travis runs, which speeds turnaround time on review since there
+# is a cap of on the number of simultaneous runs.
 branches:
   only:
     - master
+    - /^\d+\.\d+\.x$/
     - /^test-.*$/
 
 # container-based infrastructure
@@ -92,7 +148,6 @@ addons:
     - python-dev
     - python-virtualenv
     - gcc
-    - dialog
     - libaugeas0
     - libssl-dev
     - libffi-dev
@@ -104,7 +159,6 @@ addons:
     - apache2
     - libapache2-mod-wsgi
     - libapache2-mod-macro
-    - sudo
 
 install: "travis_retry pip install tox coveralls"
 script: 'travis_retry tox && ([ "xxx$BOULDER_INTEGRATION" = "xxx" ] || ./tests/travis-integration.sh)'
@@ -119,4 +173,3 @@ notifications:
     on_success: never
     on_failure: always
     use_notice: true
-    skip_join: true

@@ -1,6 +1,7 @@
 """Certbot client API."""
 import logging
 import os
+import platform
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -8,6 +9,8 @@ import OpenSSL
 import zope.component
 
 from acme import client as acme_client
+from acme import crypto_util as acme_crypto_util
+from acme import errors as acme_errors
 from acme import jose
 from acme import messages
 
@@ -15,16 +18,16 @@ import certbot
 
 from certbot import account
 from certbot import auth_handler
-from certbot import configuration
+from certbot import cli
 from certbot import constants
 from certbot import crypto_util
-from certbot import errors
+from certbot import eff
 from certbot import error_handler
+from certbot import errors
 from certbot import interfaces
-from certbot import util
 from certbot import reverter
 from certbot import storage
-from certbot import cli
+from certbot import util
 
 from certbot.display import ops as display_ops
 from certbot.display import enhancements
@@ -38,11 +41,11 @@ def acme_from_config_key(config, key):
     "Wrangle ACME client construction"
     # TODO: Allow for other alg types besides RS256
     net = acme_client.ClientNetwork(key, verify_ssl=(not config.no_verify_ssl),
-                                    user_agent=_determine_user_agent(config))
+                                    user_agent=determine_user_agent(config))
     return acme_client.Client(config.server, key=key, net=net)
 
 
-def _determine_user_agent(config):
+def determine_user_agent(config):
     """
     Set a user_agent string in the config based on the choice of plugins.
     (this wasn't knowable at construction time)
@@ -51,13 +54,55 @@ def _determine_user_agent(config):
     :rtype: `str`
     """
 
+    # WARNING: To ensure changes are in line with Certbot's privacy
+    # policy, talk to a core Certbot team member before making any
+    # changes here.
     if config.user_agent is None:
-        ua = "CertbotACMEClient/{0} ({1}) Authenticator/{2} Installer/{3}"
-        ua = ua.format(certbot.__version__, util.get_os_info_ua(),
-                       config.authenticator, config.installer)
+        ua = ("CertbotACMEClient/{0} ({1}; {2}{8}) Authenticator/{3} Installer/{4} "
+              "({5}; flags: {6}) Py/{7}")
+        ua = ua.format(certbot.__version__, cli.cli_command, util.get_os_info_ua(),
+                       config.authenticator, config.installer, config.verb,
+                       ua_flags(config), platform.python_version(),
+                       "; " + config.user_agent_comment if config.user_agent_comment else "")
     else:
         ua = config.user_agent
     return ua
+
+def ua_flags(config):
+    "Turn some very important CLI flags into clues in the user agent."
+    if isinstance(config, DummyConfig):
+        return "FLAGS"
+    flags = []
+    if config.duplicate:
+        flags.append("dup")
+    if config.renew_by_default:
+        flags.append("frn")
+    if config.allow_subset_of_names:
+        flags.append("asn")
+    if config.noninteractive_mode:
+        flags.append("n")
+    hook_names = ("pre", "post", "renew", "manual_auth", "manual_cleanup")
+    hooks = [getattr(config, h + "_hook") for h in hook_names]
+    if any(hooks):
+        flags.append("hook")
+    return " ".join(flags)
+
+class DummyConfig(object):
+    "Shim for computing a sample user agent."
+    def __init__(self):
+        self.authenticator = "XXX"
+        self.installer = "YYY"
+        self.user_agent = None
+        self.verb = "SUBCOMMAND"
+
+    def __getattr__(self, name):
+        "Any config properties we might have are None."
+        return None
+
+def sample_user_agent():
+    "Document what this Certbot's user agent string will be like."
+
+    return determine_user_agent(DummyConfig())
 
 
 def register(config, account_storage, tos_cb=None):
@@ -84,7 +129,7 @@ def register(config, account_storage, tos_cb=None):
         Terms of Service present in the contained
         `.Registration.terms_of_service` is accepted by the client, and
         ``False`` otherwise. ``tos_cb`` will be called only if the
-        client acction is necessary, i.e. when ``terms_of_service is not
+        client action is necessary, i.e. when ``terms_of_service is not
         None``. This argument is optional, if not supplied it will
         default to automatic acceptance!
 
@@ -107,7 +152,7 @@ def register(config, account_storage, tos_cb=None):
             logger.warning(msg)
             raise errors.Error(msg)
         if not config.dry_run:
-            logger.warning("Registering without email!")
+            logger.info("Registering without email!")
 
     # Each new registration shall use a fresh new key
     key = jose.JWKRSA(key=jose.ComparableRSAKey(
@@ -127,8 +172,10 @@ def register(config, account_storage, tos_cb=None):
         regr = acme.agree_to_tos(regr)
 
     acc = account.Account(regr, key)
-    account.report_new_account(acc, config)
-    account_storage.save(acc)
+    account.report_new_account(config)
+    account_storage.save(acc, acme)
+
+    eff.handle_subscription(config)
 
     return acc, acme
 
@@ -143,21 +190,25 @@ def perform_registration(acme, config):
 
     :returns: Registration Resource.
     :rtype: `acme.messages.RegistrationResource`
-
-    :raises .UnexpectedUpdate:
     """
     try:
         return acme.register(messages.NewRegistration.from_data(email=config.email))
     except messages.Error as e:
-        if e.typ == "urn:acme:error:invalidEmail":
-            config.namespace.email = display_ops.get_email(invalid=True)
-            return perform_registration(acme, config)
+        if e.code == "invalidEmail" or e.code == "invalidContact":
+            if config.noninteractive_mode:
+                msg = ("The ACME server believes %s is an invalid email address. "
+                       "Please ensure it is a valid email and attempt "
+                       "registration again." % config.email)
+                raise errors.Error(msg)
+            else:
+                config.email = display_ops.get_email(invalid=True)
+                return perform_registration(acme, config)
         else:
             raise
 
 
 class Client(object):
-    """ACME protocol client.
+    """Certbot's client.
 
     :ivar .IConfig config: Client configuration.
     :ivar .Account account: Account registered with `register`.
@@ -186,19 +237,18 @@ class Client(object):
 
         if auth is not None:
             self.auth_handler = auth_handler.AuthHandler(
-                auth, self.acme, self.account)
+                auth, self.acme, self.account, self.config.pref_challs)
         else:
             self.auth_handler = None
 
-    def obtain_certificate_from_csr(self, domains, csr,
-        typ=OpenSSL.crypto.FILETYPE_ASN1, authzr=None):
+    def obtain_certificate_from_csr(self, domains, csr, authzr=None):
         """Obtain certificate.
 
         Internal function with precondition that `domains` are
         consistent with identifiers present in the `csr`.
 
         :param list domains: Domain names.
-        :param .util.CSR csr: DER-encoded Certificate Signing
+        :param .util.CSR csr: PEM-encoded Certificate Signing
             Request. The key used to generate this CSR can be different
             than `authkey`.
         :param list authzr: List of
@@ -224,9 +274,30 @@ class Client(object):
 
         certr = self.acme.request_issuance(
             jose.ComparableX509(
-                OpenSSL.crypto.load_certificate_request(typ, csr.data)),
+                OpenSSL.crypto.load_certificate_request(OpenSSL.crypto.FILETYPE_PEM, csr.data)),
                 authzr)
-        return certr, self.acme.fetch_chain(certr)
+
+        notify = zope.component.getUtility(interfaces.IDisplay).notification
+        retries = 0
+        chain = None
+
+        while retries <= 1:
+            if retries:
+                notify('Failed to fetch chain, please check your network '
+                       'and continue', pause=True)
+            try:
+                chain = self.acme.fetch_chain(certr)
+                break
+            except acme_errors.Error:
+                logger.debug('Failed to fetch chain', exc_info=True)
+                retries += 1
+
+        if chain is None:
+            raise acme_errors.Error(
+                'Failed to fetch chain. You should not deploy the generated '
+                'certificate, please rerun the command for a new one.')
+
+        return certr, chain
 
     def obtain_certificate(self, domains):
         """Obtains a certificate from the ACME server.
@@ -246,19 +317,28 @@ class Client(object):
                 domains,
                 self.config.allow_subset_of_names)
 
-        auth_domains = set(a.body.identifier.value.encode('ascii')
-                           for a in authzr)
+        auth_domains = set(a.body.identifier.value for a in authzr)
         domains = [d for d in domains if d in auth_domains]
 
         # Create CSR from names
-        key = crypto_util.init_save_key(
-            self.config.rsa_key_size, self.config.key_dir)
-        csr = crypto_util.init_save_csr(key, domains, self.config.csr_dir)
+        if self.config.dry_run:
+            key = util.Key(file=None,
+                           pem=crypto_util.make_key(self.config.rsa_key_size))
+            csr = util.CSR(file=None, form="pem",
+                           data=acme_crypto_util.make_csr(
+                               key.pem, domains, self.config.must_staple))
+        else:
+            key = crypto_util.init_save_key(
+                self.config.rsa_key_size, self.config.key_dir)
+            csr = crypto_util.init_save_csr(key, domains, self.config.csr_dir)
 
-        return (self.obtain_certificate_from_csr(domains, csr, authzr=authzr)
-                                                                + (key, csr))
+        certr, chain = self.obtain_certificate_from_csr(
+            domains, csr, authzr=authzr)
 
-    def obtain_and_enroll_certificate(self, domains):
+        return certr, chain, key, csr
+
+    # pylint: disable=no-member
+    def obtain_and_enroll_certificate(self, domains, certname):
         """Obtain and enroll certificate.
 
         Get a new certificate for the specified domains using the specified
@@ -267,6 +347,7 @@ class Client(object):
 
         :param list domains: Domains to request.
         :param plugins: A PluginsFactory object.
+        :param str certname: Name of new cert
 
         :returns: A new :class:`certbot.storage.RenewableCert` instance
             referred to the enrolled cert lineage, False if the cert could not
@@ -281,16 +362,17 @@ class Client(object):
                 "Non-standard path(s), might not work with crontab installed "
                 "by your operating system package manager")
 
+        new_name = certname if certname else domains[0]
         if self.config.dry_run:
             logger.debug("Dry run: Skipping creating new lineage for %s",
-                        domains[0])
+                        new_name)
             return None
         else:
             return storage.RenewableCert.new_lineage(
-                domains[0], OpenSSL.crypto.dump_certificate(
+                new_name, OpenSSL.crypto.dump_certificate(
                     OpenSSL.crypto.FILETYPE_PEM, certr.body.wrapped),
                 key.pem, crypto_util.dump_pyopenssl_chain(chain),
-                configuration.RenewerConfiguration(self.config.namespace))
+                self.config)
 
     def save_certificate(self, certr, chain_cert,
                          cert_path, chain_path, fullchain_path):
@@ -360,7 +442,8 @@ class Client(object):
 
         chain_path = None if chain_path is None else os.path.abspath(chain_path)
 
-        with error_handler.ErrorHandler(self.installer.recovery_routine):
+        msg = ("Unable to install the certificate")
+        with error_handler.ErrorHandler(self._recovery_routine_with_msg, msg):
             for dom in domains:
                 self.installer.deploy_cert(
                     domain=dom, cert_path=os.path.abspath(cert_path),
@@ -377,68 +460,57 @@ class Client(object):
         with error_handler.ErrorHandler(self._rollback_and_restart, msg):
             # sites may have been enabled / final cleanup
             self.installer.restart()
-    def enhance_config(self, domains, config):
+
+    def enhance_config(self, domains, chain_path):
         """Enhance the configuration.
 
         :param list domains: list of domains to configure
-
-        :ivar config: Namespace typically produced by
-            :meth:`argparse.ArgumentParser.parse_args`.
-            it must have the redirect, hsts and uir attributes.
-        :type namespace: :class:`argparse.Namespace`
+        :param chain_path: chain file path
+        :type chain_path: `str` or `None`
 
         :raises .errors.Error: if no installer is specified in the
             client.
 
         """
-
         if self.installer is None:
             logger.warning("No installer is specified, there isn't any "
                            "configuration to enhance.")
             raise errors.Error("No installer available")
 
-        if config is None:
-            logger.warning("No config is specified.")
-            raise errors.Error("No config available")
-
+        enhanced = False
+        enhancement_info = (
+            ("hsts", "ensure-http-header", "Strict-Transport-Security"),
+            ("redirect", "redirect", None),
+            ("staple", "staple-ocsp", chain_path),
+            ("uir", "ensure-http-header", "Upgrade-Insecure-Requests"),)
         supported = self.installer.supported_enhancements()
-        redirect = config.redirect if "redirect" in supported else False
-        hsts = config.hsts if "ensure-http-header" in supported else False
-        uir = config.uir if "ensure-http-header"  in supported else False
-        staple = config.staple if "staple-ocsp" in supported else False
 
-        if redirect is None:
-            redirect = enhancements.ask("redirect")
-
-        if redirect:
-            self.apply_enhancement(domains, "redirect")
-
-        if hsts:
-            self.apply_enhancement(domains, "ensure-http-header",
-                    "Strict-Transport-Security")
-        if uir:
-            self.apply_enhancement(domains, "ensure-http-header",
-                    "Upgrade-Insecure-Requests")
-        if staple:
-            self.apply_enhancement(domains, "staple-ocsp")
+        for config_name, enhancement_name, option in enhancement_info:
+            config_value = getattr(self.config, config_name)
+            if enhancement_name in supported:
+                if config_name == "redirect" and config_value is None:
+                    config_value = enhancements.ask(enhancement_name)
+                if config_value:
+                    self.apply_enhancement(domains, enhancement_name, option)
+                    enhanced = True
+            elif config_value:
+                logger.warning(
+                    "Option %s is not supported by the selected installer. "
+                    "Skipping enhancement.", config_name)
 
         msg = ("We were unable to restart web server")
-        if redirect or hsts or uir or staple:
+        if enhanced:
             with error_handler.ErrorHandler(self._rollback_and_restart, msg):
                 self.installer.restart()
 
     def apply_enhancement(self, domains, enhancement, options=None):
-        """Applies an enhacement on all domains.
+        """Applies an enhancement on all domains.
 
-        :param domains: list of ssl_vhosts
-        :type list of str
+        :param list domains: list of ssl_vhosts (as strings)
+        :param str enhancement: name of enhancement, e.g. ensure-http-header
+        :param str options: options to enhancement, e.g. Strict-Transport-Security
 
-        :param enhancement: name of enhancement, e.g. ensure-http-header
-        :type str
-
-        .. note:: when more options are need make options a list.
-        :param options: options to enhancement, e.g. Strict-Transport-Security
-        :type str
+            .. note:: When more `options` are needed, make options a list.
 
         :raises .errors.PluginError: If Enhancement is not supported, or if
             there is any other problem with the enhancement.
@@ -484,7 +556,7 @@ class Client(object):
             self.installer.rollback_checkpoints()
             self.installer.restart()
         except:
-            # TODO: suggest letshelp-letsencypt here
+            # TODO: suggest letshelp-letsencrypt here
             reporter.add_message(
                 "An error occurred and we failed to restore your config and "
                 "restart your server. Please submit a bug report to "
@@ -586,10 +658,10 @@ def _open_pem_file(cli_arg_path, pem_path):
 
     """
     if cli.set_by_cli(cli_arg_path):
-        return util.safe_open(pem_path, chmod=0o644),\
+        return util.safe_open(pem_path, chmod=0o644, mode="wb"),\
             os.path.abspath(pem_path)
     else:
-        uniq = util.unique_file(pem_path, 0o644)
+        uniq = util.unique_file(pem_path, 0o644, "wb")
         return uniq[0], os.path.abspath(uniq[1])
 
 def _save_chain(chain_pem, chain_file):

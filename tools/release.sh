@@ -44,8 +44,14 @@ export GPG_TTY=$(tty)
 # port for a local Python Package Index (used in testing)
 PORT=${PORT:-1234}
 
-# subpackages to be released
-SUBPKGS=${SUBPKGS:-"acme certbot-apache certbot-nginx"}
+# subpackages to be released (the way developers think about them)
+SUBPKGS_IN_AUTO_NO_CERTBOT="acme certbot-apache certbot-nginx"
+SUBPKGS_NOT_IN_AUTO="certbot-dns-cloudflare certbot-dns-cloudxns certbot-dns-digitalocean certbot-dns-dnsimple certbot-dns-dnsmadeeasy certbot-dns-google certbot-dns-luadns certbot-dns-nsone certbot-dns-rfc2136 certbot-dns-route53"
+
+# subpackages to be released (the way the script thinks about them)
+SUBPKGS_IN_AUTO="certbot $SUBPKGS_IN_AUTO_NO_CERTBOT"
+SUBPKGS_NO_CERTBOT="$SUBPKGS_IN_AUTO_NO_CERTBOT $SUBPKGS_NOT_IN_AUTO"
+SUBPKGS="$SUBPKGS_IN_AUTO $SUBPKGS_NOT_IN_AUTO"
 subpkgs_modules="$(echo $SUBPKGS | sed s/-/_/g)"
 # certbot_compatibility_test is not packaged because:
 # - it is not meant to be used by anyone else than Certbot devs
@@ -72,7 +78,7 @@ pip install -U virtualenv
 root_without_le="$version.$$"
 root="./releases/le.$root_without_le"
 
-echo "Cloning into fresh copy at $root"  # clean repo = no artificats
+echo "Cloning into fresh copy at $root"  # clean repo = no artifacts
 git clone . $root
 git rev-parse HEAD
 cd $root
@@ -83,21 +89,22 @@ git checkout "$RELEASE_BRANCH"
 
 SetVersion() {
     ver="$1"
-    for pkg_dir in $SUBPKGS certbot-compatibility-test
+    # bumping Certbot's version number is done differently
+    for pkg_dir in $SUBPKGS_NO_CERTBOT certbot-compatibility-test
     do
       sed -i "s/^version.*/version = '$ver'/" $pkg_dir/setup.py
     done
     sed -i "s/^__version.*/__version__ = '$ver'/" certbot/__init__.py
-    
+
     # interactive user input
-    git add -p certbot $SUBPKGS certbot-compatibility-test 
+    git add -p $SUBPKGS certbot-compatibility-test
 
 }
 
 SetVersion "$version"
 
 echo "Preparing sdists and wheels"
-for pkg_dir in . $SUBPKGS
+for pkg_dir in . $SUBPKGS_NO_CERTBOT
 do
   cd $pkg_dir
 
@@ -109,7 +116,7 @@ do
   echo "Signing ($pkg_dir)"
   for x in dist/*.tar.gz dist/*.whl
   do
-      gpg -u "$RELEASE_GPG_KEY" --detach-sign --armor --sign $x
+      gpg2 -u "$RELEASE_GPG_KEY" --detach-sign --armor --sign --digest-algo sha256 $x
   done
 
   cd -
@@ -118,7 +125,7 @@ done
 
 mkdir "dist.$version"
 mv dist "dist.$version/certbot"
-for pkg_dir in $SUBPKGS
+for pkg_dir in $SUBPKGS_NO_CERTBOT
 do
   mv $pkg_dir/dist "dist.$version/$pkg_dir/"
 done
@@ -140,45 +147,45 @@ pip install -U pip
 pip install \
   --no-cache-dir \
   --extra-index-url http://localhost:$PORT \
-  certbot $SUBPKGS
+  $SUBPKGS
 # stop local PyPI
 kill $!
 cd ~-
 
 # get a snapshot of the CLI help for the docs
 certbot --help all > docs/cli-help.txt
+jws --help > acme/docs/jws-help.txt
 
+cd ..
 # freeze before installing anything else, so that we know end-user KGS
 # make sure "twine upload" doesn't catch "kgs"
-if [ -d ../kgs ] ; then
+if [ -d kgs ] ; then
     echo Deleting old kgs...
-    rm -rf ../kgs
+    rm -rf kgs
 fi
-mkdir ../kgs
-kgs="../kgs/$version"
+mkdir kgs
+kgs="kgs/$version"
 pip freeze | tee $kgs
 pip install nose
-for module in certbot $subpkgs_modules ; do
+for module in $subpkgs_modules ; do
     echo testing $module
     nosetests $module
 done
+cd ~-
 
 # pin pip hashes of the things we just built
-for pkg in acme certbot certbot-apache ; do
+for pkg in $SUBPKGS_IN_AUTO ; do
     echo $pkg==$version \\
     pip hash dist."$version/$pkg"/*.{whl,gz} | grep "^--hash" | python2 -c 'from sys import stdin; input = stdin.read(); print "   ", input.replace("\n--hash", " \\\n    --hash"),'
-done > /tmp/hashes.$$
+done > letsencrypt-auto-source/pieces/certbot-requirements.txt
 deactivate
 
-if ! wc -l /tmp/hashes.$$ | grep -qE "^\s*9 " ; then
+# there should be one requirement specifier and two hashes for each subpackage
+expected_count=$(expr $(echo $SUBPKGS_IN_AUTO | wc -w) \* 3)
+if ! wc -l letsencrypt-auto-source/pieces/certbot-requirements.txt | grep -qE "^\s*$expected_count " ; then
     echo Unexpected pip hash output
     exit 1
 fi
-
-# perform hideous surgery on requirements.txt...
-head -n -9 letsencrypt-auto-source/pieces/letsencrypt-auto-requirements.txt > /tmp/req.$$
-cat /tmp/hashes.$$ >> /tmp/req.$$
-cp /tmp/req.$$ letsencrypt-auto-source/pieces/letsencrypt-auto-requirements.txt
 
 # ensure we have the latest built version of leauto
 letsencrypt-auto-source/build.py
@@ -191,9 +198,9 @@ while ! openssl dgst -sha256 -verify $RELEASE_OPENSSL_PUBKEY -signature \
 done
 
 # This signature is not quite as strong, but easier for people to verify out of band
-gpg -u "$RELEASE_GPG_KEY" --detach-sign --armor --sign letsencrypt-auto-source/letsencrypt-auto
+gpg2 -u "$RELEASE_GPG_KEY" --detach-sign --armor --sign --digest-algo sha256 letsencrypt-auto-source/letsencrypt-auto
 # We can't rename the openssl letsencrypt-auto.sig for compatibility reasons,
-# but we can use the right name for cerbot-auto.asc from day one
+# but we can use the right name for certbot-auto.asc from day one
 mv letsencrypt-auto-source/letsencrypt-auto.asc letsencrypt-auto-source/certbot-auto.asc
 
 # copy leauto to the root, overwriting the previous release version
@@ -211,11 +218,10 @@ name=${root_without_le%.*}
 ext="${root_without_le##*.}"
 rev="$(git rev-parse --short HEAD)"
 echo tar cJvf $name.$rev.tar.xz $name.$rev
-echo gpg -U $RELEASE_GPG_KEY --detach-sign --armor $name.$rev.tar.xz
+echo gpg2 -U $RELEASE_GPG_KEY --detach-sign --armor $name.$rev.tar.xz
 cd ~-
 
 echo "New root: $root"
-echo "KGS is at $root/kgs"
 echo "Test commands (in the letstest repo):"
 echo 'python multitester.py targets.yaml $AWS_KEY $USERNAME scripts/test_leauto_upgrades.sh --alt_pip $YOUR_PIP_REPO --branch public-beta'
 echo 'python multitester.py  targets.yaml $AWK_KEY $USERNAME scripts/test_letsencrypt_auto_certonly_standalone.sh --branch candidate-0.1.1'
